@@ -57,6 +57,9 @@ import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 
 public class ClientUtil {
+    // header name in ThreadContext
+    public static final String OPENDISTRO_SECURITY_PROTECTED_INDICES_CONF_REQUEST = "_opendistro_security_protected_indices_conf_request";
+
     private volatile TimeValue requestTimeout;
     private Client client;
     private final Throttler throttler;
@@ -87,7 +90,8 @@ public class ClientUtil {
         Logger LOG,
         BiConsumer<Request, ActionListener<Response>> consumer
     ) {
-        try {
+        try (ThreadContext.StoredContext context = threadPool.getThreadContext().stashContext()) {
+            threadPool.getThreadContext().putTransient(OPENDISTRO_SECURITY_PROTECTED_INDICES_CONF_REQUEST, "true");
             AtomicReference<Response> respReference = new AtomicReference<>();
             final CountDownLatch latch = new CountDownLatch(1);
 
@@ -127,11 +131,14 @@ public class ClientUtil {
         BiConsumer<Request, ActionListener<Response>> consumer,
         ActionListener<Response> listener
     ) {
-        consumer
-            .accept(
-                request,
-                ActionListener.wrap(response -> { listener.onResponse(response); }, exception -> { listener.onFailure(exception); })
-            );
+        try (ThreadContext.StoredContext context = threadPool.getThreadContext().stashContext()) {
+            threadPool.getThreadContext().putTransient(OPENDISTRO_SECURITY_PROTECTED_INDICES_CONF_REQUEST, "true");
+            consumer
+                .accept(
+                    request,
+                    ActionListener.wrap(response -> { listener.onResponse(response); }, exception -> { listener.onFailure(exception); })
+                );
+        }
     }
 
     /**
@@ -147,12 +154,15 @@ public class ClientUtil {
         Request request,
         ActionListener<Response> listener
     ) {
-        client
-            .execute(
-                action,
-                request,
-                ActionListener.wrap(response -> { listener.onResponse(response); }, exception -> { listener.onFailure(exception); })
-            );
+        try (ThreadContext.StoredContext context = threadPool.getThreadContext().stashContext()) {
+            threadPool.getThreadContext().putTransient(OPENDISTRO_SECURITY_PROTECTED_INDICES_CONF_REQUEST, "true");
+            client
+                .execute(
+                    action,
+                    request,
+                    ActionListener.wrap(response -> { listener.onResponse(response); }, exception -> { listener.onFailure(exception); })
+                );
+        }
     }
 
     /**
@@ -171,7 +181,10 @@ public class ClientUtil {
         Request request,
         Function<Request, ActionFuture<Response>> function
     ) {
-        return function.apply(request).actionGet(requestTimeout);
+        try (ThreadContext.StoredContext context = threadPool.getThreadContext().stashContext()) {
+            threadPool.getThreadContext().putTransient(OPENDISTRO_SECURITY_PROTECTED_INDICES_CONF_REQUEST, "true");
+            return function.apply(request).actionGet(requestTimeout);
+        }
     }
 
     /**
@@ -209,8 +222,12 @@ public class ClientUtil {
             final CountDownLatch latch = new CountDownLatch(1);
 
             try (ThreadContext.StoredContext context = threadPool.getThreadContext().stashContext()) {
-                assert context != null;
-                threadPool.getThreadContext().putHeader(Task.X_OPAQUE_ID, CommonName.ANOMALY_DETECTOR + ":" + detectorId);
+                String opaqueId = threadPool.getThreadContext().getHeader(Task.X_OPAQUE_ID);
+                if (opaqueId != null) {
+                    LOG.info("Opaque id is present: {}", opaqueId);
+                } else {
+                    threadPool.getThreadContext().putHeader(Task.X_OPAQUE_ID, CommonName.ANOMALY_DETECTOR + ":" + detectorId);
+                }
                 consumer.accept(request, new LatchedActionListener<Response>(ActionListener.wrap(response -> {
                     // clear negative cache
                     throttler.clearFilteredQuery(detectorId);
