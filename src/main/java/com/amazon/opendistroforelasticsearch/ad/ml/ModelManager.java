@@ -1039,4 +1039,18 @@ public class ModelManager {
             .forEach(entry -> { res.put(entry.getKey(), 0L); });
         return res;
     }
+
+    /**
+      * Get all RCF partition's size corresponding to a detector.  Thresholding
+      *  models' size is a constant since they are small in size (KB).
+      * @param modelId model id
+      */
+    public long getTotalUpdates(String modelId) {
+        ModelState<RandomCutForest> model = forests.get(modelId);
+        if (model != null) {
+            return model.getModel().getTotalUpdates();
+        }
+
+        return 0;
+    }
 }

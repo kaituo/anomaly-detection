@@ -39,6 +39,7 @@ import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentType;
 
 import com.amazon.opendistroforelasticsearch.ad.common.exception.LimitExceededException;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
@@ -52,6 +53,7 @@ public class ADStateManager {
     private static final Logger LOG = LogManager.getLogger(ADStateManager.class);
     private ConcurrentHashMap<String, Entry<AnomalyDetector, Instant>> currentDetectors;
     private ConcurrentHashMap<String, Entry<Integer, Instant>> partitionNumber;
+    private ConcurrentHashMap<String, Instant> currentCheckpoints;
     private Client client;
     private ModelManager modelManager;
     private NamedXContentRegistry xContentRegistry;
@@ -81,6 +83,7 @@ public class ADStateManager {
         this.clock = clock;
         this.settings = settings;
         this.stateTtl = stateTtl;
+        this.currentCheckpoints = new ConcurrentHashMap<>();
     }
 
     /**
@@ -112,10 +115,10 @@ public class ADStateManager {
 
         GetRequest request = new GetRequest(AnomalyDetector.ANOMALY_DETECTORS_INDEX, adID);
 
-        clientUtil.<GetRequest, GetResponse>asyncRequest(request, client::get, onGetResponse(adID, listener));
+        clientUtil.<GetRequest, GetResponse>asyncRequest(request, client::get, onGetDetectorResponse(adID, listener));
     }
 
-    private ActionListener<GetResponse> onGetResponse(String adID, ActionListener<Optional<AnomalyDetector>> listener) {
+    private ActionListener<GetResponse> onGetDetectorResponse(String adID, ActionListener<Optional<AnomalyDetector>> listener) {
         return ActionListener.wrap(response -> {
             if (response == null || !response.isExists()) {
                 listener.onResponse(Optional.empty());
@@ -140,6 +143,30 @@ public class ADStateManager {
         }, listener::onFailure);
     }
 
+    public void getDetectorCheckpoint(String adID, ActionListener<Boolean> listener) {
+        Instant timeGettingCheckpoint = currentCheckpoints.get(adID);
+        if (timeGettingCheckpoint != null) {
+            currentCheckpoints.put(adID, clock.instant());
+            listener.onResponse(Boolean.TRUE);
+            return;
+        }
+
+        GetRequest request = new GetRequest(CommonName.CHECKPOINT_INDEX_NAME, modelManager.getRcfModelId(adID, 0));
+
+        clientUtil.<GetRequest, GetResponse>asyncRequest(request, client::get, onGetCheckpointResponse(adID, listener));
+    }
+
+    private ActionListener<GetResponse> onGetCheckpointResponse(String adID, ActionListener<Boolean> listener) {
+        return ActionListener.wrap(response -> {
+            if (response == null || !response.isExists()) {
+                listener.onResponse(Boolean.FALSE);
+            } else {
+                currentCheckpoints.put(adID, clock.instant());
+                listener.onResponse(Boolean.TRUE);
+            }
+        }, listener::onFailure);
+    }
+
     /**
      * Used in delete workflow
      *
@@ -148,11 +175,13 @@ public class ADStateManager {
     public void clear(String adID) {
         currentDetectors.remove(adID);
         partitionNumber.remove(adID);
+        currentCheckpoints.remove(adID);
     }
 
     public void maintenance() {
         maintenance(currentDetectors);
         maintenance(partitionNumber);
+        maintenanceFlag(currentCheckpoints);
     }
 
     /**
@@ -169,6 +198,27 @@ public class ADStateManager {
                 Entry<T, Instant> stateAndTime = entry.getValue();
                 if (stateAndTime.getValue().plus(stateTtl).isBefore(clock.instant())) {
                     states.remove(detectorId);
+                }
+            } catch (Exception e) {
+                LOG.warn("Failed to finish maintenance for detector id " + detectorId, e);
+            }
+        });
+    }
+
+    /**
+     * Clean states if it is older than our stateTtl. The input has to be a
+     * ConcurrentHashMap otherwise we will have
+     * java.util.ConcurrentModificationException.
+     *
+     * @param flags flags to be maintained
+     */
+    void maintenanceFlag(ConcurrentHashMap<String, Instant> flags) {
+        flags.entrySet().stream().forEach(entry -> {
+            String detectorId = entry.getKey();
+            try {
+                Instant time = entry.getValue();
+                if (time.plus(stateTtl).isBefore(clock.instant())) {
+                    flags.remove(detectorId);
                 }
             } catch (Exception e) {
                 LOG.warn("Failed to finish maintenance for detector id " + detectorId, e);

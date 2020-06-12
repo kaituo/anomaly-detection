@@ -42,6 +42,7 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -55,6 +56,8 @@ import java.util.function.Function;
 import org.elasticsearch.ElasticsearchTimeoutException;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionRequestValidationException;
+import org.elasticsearch.action.get.GetRequest;
+import org.elasticsearch.action.get.GetResponse;
 import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.action.support.ActionFilters;
@@ -92,6 +95,7 @@ import org.junit.BeforeClass;
 import test.com.amazon.opendistroforelasticsearch.ad.util.JsonDeserializer;
 
 import com.amazon.opendistroforelasticsearch.ad.AbstractADTest;
+import com.amazon.opendistroforelasticsearch.ad.TestHelpers;
 import com.amazon.opendistroforelasticsearch.ad.breaker.ADCircuitBreakerService;
 import com.amazon.opendistroforelasticsearch.ad.cluster.HashRing;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.AnomalyDetectionException;
@@ -105,21 +109,25 @@ import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
 import com.amazon.opendistroforelasticsearch.ad.feature.SinglePointFeatures;
+import com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.RcfResult;
 import com.amazon.opendistroforelasticsearch.ad.ml.ThresholdingResult;
 import com.amazon.opendistroforelasticsearch.ad.ml.rcf.CombinedRcfResult;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyResult;
+import com.amazon.opendistroforelasticsearch.ad.model.DetectorInternalState;
 import com.amazon.opendistroforelasticsearch.ad.model.FeatureData;
 import com.amazon.opendistroforelasticsearch.ad.stats.ADStat;
 import com.amazon.opendistroforelasticsearch.ad.stats.ADStats;
 import com.amazon.opendistroforelasticsearch.ad.stats.StatNames;
 import com.amazon.opendistroforelasticsearch.ad.stats.suppliers.CounterSupplier;
+import com.amazon.opendistroforelasticsearch.ad.transport.handler.DetectorStateHandler;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 import com.amazon.opendistroforelasticsearch.ad.util.ColdStartRunner;
 import com.amazon.opendistroforelasticsearch.ad.util.IndexUtils;
 import com.amazon.opendistroforelasticsearch.ad.util.Throttler;
+import com.amazon.opendistroforelasticsearch.ad.util.ThrowingConsumerWrapper;
 import com.google.gson.JsonElement;
 
 public class AnomalyResultTests extends AbstractADTest {
@@ -141,6 +149,7 @@ public class AnomalyResultTests extends AbstractADTest {
     private String featureName;
     private ADCircuitBreakerService adCircuitBreakerService;
     private ADStats adStats;
+    private DetectorStateHandler detectorStateHandler;
 
     @BeforeClass
     public static void setUpBeforeClass() {
@@ -242,7 +251,7 @@ public class AnomalyResultTests extends AbstractADTest {
         Throttler throttler = new Throttler(clock);
         ThreadPool threadpool = mock(ThreadPool.class);
         ClientUtil clientUtil = new ClientUtil(Settings.EMPTY, client, throttler, threadpool);
-        IndexUtils indexUtils = new IndexUtils(client, clientUtil, clusterService);
+        IndexUtils indexUtils = new IndexUtils(client, clientUtil, clusterService, indexNameResolver);
 
         Map<String, ADStat<?>> statsMap = new HashMap<String, ADStat<?>>() {
             {
@@ -252,6 +261,39 @@ public class AnomalyResultTests extends AbstractADTest {
         };
 
         adStats = new ADStats(indexUtils, normalModelManager, statsMap);
+
+        AnomalyDetectionIndices anomalyDetectionIndices = mock(AnomalyDetectionIndices.class);
+        detectorStateHandler = new DetectorStateHandler(
+            client,
+            settings,
+            threadPool,
+            ThrowingConsumerWrapper.throwingConsumerWrapper(anomalyDetectionIndices::initDetectorStateIndex),
+            anomalyDetectionIndices::doesDetectorStateIndexExist,
+            clientUtil,
+            indexUtils,
+            clusterService
+        );
+
+        doAnswer(invocation -> {
+            Object[] args = invocation.getArguments();
+            GetRequest request = (GetRequest) args[0];
+            ActionListener<GetResponse> listener = (ActionListener<GetResponse>) args[1];
+
+            if (request.index().equals(DetectorInternalState.DETECTOR_STATE_INDEX)) {
+
+                DetectorInternalState.Builder result = new DetectorInternalState.Builder().lastUpdateTime(Instant.now());
+
+                result.rcfUpdates(1000);
+
+                listener
+                    .onResponse(
+                        TestHelpers.createGetResponse(result.build(), detector.getDetectorId(), DetectorInternalState.DETECTOR_STATE_INDEX)
+                    );
+
+            }
+
+            return null;
+        }).when(client).get(any(), any());
     }
 
     @Override
@@ -267,11 +309,6 @@ public class AnomalyResultTests extends AbstractADTest {
 
     private Throwable assertException(PlainActionFuture<AnomalyResultResponse> listener, Class<? extends Exception> exceptionType) {
         return expectThrows(exceptionType, () -> listener.actionGet());
-    }
-
-    private void assertException(PlainActionFuture<AnomalyResultResponse> listener, Class<? extends Exception> exceptionType, String msg) {
-        Exception e = expectThrows(exceptionType, () -> listener.actionGet());
-        assertThat(e.getMessage(), containsString(msg));
     }
 
     public void testNormal() throws IOException {
@@ -297,7 +334,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
@@ -349,7 +387,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
@@ -430,7 +469,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
@@ -464,7 +504,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
@@ -502,7 +543,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
@@ -533,7 +575,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             breakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
@@ -597,7 +640,8 @@ public class AnomalyResultTests extends AbstractADTest {
             hackedClusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
@@ -662,7 +706,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
         PlainActionFuture<AnomalyResultResponse> listener = new PlainActionFuture<>();
@@ -694,7 +739,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         TransportRequestOptions option = TransportRequestOptions
@@ -846,7 +892,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
         AnomalyResultTransportAction.RCFActionListener listener = action.new RCFActionListener(
             null, null, null, null, null, null, null, null, null, 0, new AtomicInteger(), null
@@ -868,7 +915,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultTransportAction.ColdStartJob job = action.new ColdStartJob(detector);
@@ -893,7 +941,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultTransportAction.ColdStartJob job = action.new ColdStartJob(detector);
@@ -916,7 +965,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultTransportAction.ColdStartJob job = action.new ColdStartJob(detector);
@@ -959,7 +1009,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
@@ -1042,7 +1093,8 @@ public class AnomalyResultTests extends AbstractADTest {
             hackedClusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
@@ -1086,7 +1138,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
         AnomalyResultTransportAction.RCFActionListener listener = action.new RCFActionListener(
             null, "123-rcf-0", null, "123", null, null, null, null, null, 0, new AtomicInteger(), null
@@ -1118,7 +1171,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);
@@ -1159,7 +1213,8 @@ public class AnomalyResultTests extends AbstractADTest {
             clusterService,
             indexNameResolver,
             adCircuitBreakerService,
-            adStats
+            adStats,
+            detectorStateHandler
         );
 
         AnomalyResultRequest request = new AnomalyResultRequest(adID, 100, 200);

@@ -72,6 +72,8 @@ public class ADStateManagerTests extends ESTestCase {
     private AnomalyDetector detectorToCheck;
     private Settings settings;
 
+    private GetResponse checkpointResponse;
+
     @Override
     protected NamedXContentRegistry xContentRegistry() {
         SearchModule searchModule = new SearchModule(Settings.EMPTY, false, Collections.emptyList());
@@ -98,6 +100,7 @@ public class ADStateManagerTests extends ESTestCase {
 
         stateManager = new ADStateManager(client, xContentRegistry(), modelManager, settings, clientUtil, clock, duration);
 
+        checkpointResponse = mock(GetResponse.class);
     }
 
     @Override
@@ -153,6 +156,30 @@ public class ADStateManagerTests extends ESTestCase {
         return detectorToCheck.getDetectorId();
     }
 
+    @SuppressWarnings("unchecked")
+    private void setupCheckpoint(boolean responseExists) throws IOException {
+        when(checkpointResponse.isExists()).thenReturn(responseExists);
+
+        doAnswer(invocation -> {
+            Object[] args = invocation.getArguments();
+            assertTrue(String.format("The size of args is %d.  Its content is %s", args.length, Arrays.toString(args)), args.length >= 2);
+
+            GetRequest request = null;
+            ActionListener<GetResponse> listener = null;
+            if (args[0] instanceof GetRequest) {
+                request = (GetRequest) args[0];
+            }
+            if (args[2] instanceof ActionListener) {
+                listener = (ActionListener<GetResponse>) args[2];
+            }
+
+            assertTrue(request != null && listener != null);
+            listener.onResponse(checkpointResponse);
+
+            return null;
+        }).when(clientUtil).asyncRequest(any(GetRequest.class), any(), any(ActionListener.class));
+    }
+
     public void testGetPartitionNumber() throws IOException, InterruptedException {
         String detectorId = setupDetector(true);
         int partitionNumber = stateManager
@@ -204,6 +231,24 @@ public class ADStateManagerTests extends ESTestCase {
 
     }
 
+    public void testMaintenanceFlagNotRemove() throws IOException {
+        ConcurrentHashMap<String, Instant> flags = new ConcurrentHashMap<>();
+        when(clock.instant()).thenReturn(Instant.MIN);
+        flags.put("123", Instant.MAX);
+        stateManager.maintenanceFlag(flags);
+        assertEquals(1, flags.size());
+
+    }
+
+    public void testMaintenancFlagRemove() throws IOException {
+        ConcurrentHashMap<String, Instant> flags = new ConcurrentHashMap<>();
+        when(clock.instant()).thenReturn(Instant.MAX);
+        flags.put("123", Instant.MIN);
+        stateManager.maintenanceFlag(flags);
+        assertEquals(0, flags.size());
+
+    }
+
     public void testHasRunningQuery() throws IOException {
         stateManager = new ADStateManager(
             client,
@@ -229,5 +274,28 @@ public class ADStateManagerTests extends ESTestCase {
                 detectorId,
                 ActionListener.wrap(asDetector -> { assertEquals(detectorToCheck, asDetector.get()); }, exception -> assertTrue(false))
             );
+    }
+
+    public void getCheckpointTestTemplate(boolean exists) throws IOException {
+        setupCheckpoint(exists);
+        when(clock.instant()).thenReturn(Instant.MIN);
+        stateManager
+            .getDetectorCheckpoint(
+                "123",
+                ActionListener.wrap(checkpointExists -> { assertEquals(exists, checkpointExists); }, exception -> {
+                    for (StackTraceElement ste : exception.getStackTrace()) {
+                        logger.info(ste);
+                    }
+                    assertTrue(false);
+                })
+            );
+    }
+
+    public void testCheckpointExists() throws IOException {
+        getCheckpointTestTemplate(true);
+    }
+
+    public void testCheckpointNotExists() throws IOException {
+        getCheckpointTestTemplate(false);
     }
 }
