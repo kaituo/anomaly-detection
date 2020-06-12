@@ -80,7 +80,7 @@ public class RCFResultTests extends ESTestCase {
         );
         doAnswer(invocation -> {
             ActionListener<RcfResult> listener = invocation.getArgument(3);
-            listener.onResponse(new RcfResult(0, 0, 25));
+            listener.onResponse(new RcfResult(0, 0, 25, 1000));
             return null;
         }).when(manager).getRcfResult(any(String.class), any(String.class), any(double[].class), any(ActionListener.class));
 
@@ -128,7 +128,7 @@ public class RCFResultTests extends ESTestCase {
     }
 
     public void testSerialzationResponse() throws IOException {
-        RCFResultResponse response = new RCFResultResponse(0.3, 0, 26);
+        RCFResultResponse response = new RCFResultResponse(0.3, 0, 26, 1000);
         BytesStreamOutput output = new BytesStreamOutput();
         response.writeTo(output);
 
@@ -139,7 +139,7 @@ public class RCFResultTests extends ESTestCase {
     }
 
     public void testJsonResponse() throws IOException, JsonPathNotFoundException {
-        RCFResultResponse response = new RCFResultResponse(0.3, 0, 26);
+        RCFResultResponse response = new RCFResultResponse(0.3, 0, 26, 1000);
         XContentBuilder builder = jsonBuilder();
         response.toXContent(builder, ToXContent.EMPTY_PARAMS);
 
@@ -205,7 +205,7 @@ public class RCFResultTests extends ESTestCase {
         );
         doAnswer(invocation -> {
             ActionListener<RcfResult> listener = invocation.getArgument(3);
-            listener.onResponse(new RcfResult(0, 0, 25));
+            listener.onResponse(new RcfResult(0, 0, 25, 1000));
             return null;
         }).when(manager).getRcfResult(any(String.class), any(String.class), any(double[].class), any(ActionListener.class));
         when(breakerService.isOpen()).thenReturn(true);

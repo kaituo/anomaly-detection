@@ -211,17 +211,19 @@ public class ModelManager {
     public CombinedRcfResult combineRcfResults(List<RcfResult> rcfResults) {
         CombinedRcfResult combinedResult = null;
         if (rcfResults.isEmpty()) {
-            combinedResult = new CombinedRcfResult(0, 0);
+            combinedResult = new CombinedRcfResult(0, 0, 0);
         } else {
             int totalForestSize = rcfResults.stream().mapToInt(RcfResult::getForestSize).sum();
             if (totalForestSize == 0) {
-                combinedResult = new CombinedRcfResult(0, 0);
+                combinedResult = new CombinedRcfResult(0, 0, 0);
             } else {
                 double score = rcfResults.stream().mapToDouble(r -> r.getScore() * r.getForestSize()).sum() / totalForestSize;
                 double confidence = rcfResults.stream().mapToDouble(r -> r.getConfidence() * r.getForestSize()).sum() / Math
                     .max(rcfNumTrees, totalForestSize);
-                combinedResult = new CombinedRcfResult(score, confidence);
+                long totalUpdates = rcfResults.stream().mapToLong(RcfResult::getTotalUpdates).max().orElse(0L);
+                combinedResult = new CombinedRcfResult(score, confidence, totalUpdates);
             }
+
         }
         return combinedResult;
     }
@@ -355,7 +357,7 @@ public class ModelManager {
         int forestSize = rcf.getNumberOfTrees();
         rcf.update(point);
         modelState.setLastUsedTime(clock.instant());
-        return new RcfResult(score, confidence, forestSize);
+        return new RcfResult(score, confidence, forestSize, rcf.getTotalUpdates());
     }
 
     /**
@@ -388,7 +390,7 @@ public class ModelManager {
         int forestSize = rcf.getNumberOfTrees();
         rcf.update(point);
         modelState.setLastUsedTime(clock.instant());
-        listener.onResponse(new RcfResult(score, confidence, forestSize));
+        listener.onResponse(new RcfResult(score, confidence, forestSize, rcf.getTotalUpdates()));
     }
 
     private void processRcfCheckpoint(

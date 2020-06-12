@@ -28,7 +28,8 @@ public class CombinedRcfResultTests {
 
     private double score = 1.;
     private double confidence = .5;
-    private CombinedRcfResult rcfResult = new CombinedRcfResult(score, confidence);
+    private long totalUpdates = 1000;
+    private CombinedRcfResult rcfResult = new CombinedRcfResult(score, confidence, totalUpdates);
 
     @Test
     public void getters_returnExcepted() {
@@ -41,10 +42,10 @@ public class CombinedRcfResultTests {
             new Object[] { rcfResult, null, false },
             new Object[] { rcfResult, rcfResult, true },
             new Object[] { rcfResult, 1, false },
-            new Object[] { rcfResult, new CombinedRcfResult(score, confidence), true },
-            new Object[] { rcfResult, new CombinedRcfResult(score + 1, confidence), false },
-            new Object[] { rcfResult, new CombinedRcfResult(score, confidence + 1), false },
-            new Object[] { rcfResult, new CombinedRcfResult(score + 1, confidence + 1), false }, };
+            new Object[] { rcfResult, new CombinedRcfResult(score, confidence, totalUpdates), true },
+            new Object[] { rcfResult, new CombinedRcfResult(score + 1, confidence, totalUpdates), false },
+            new Object[] { rcfResult, new CombinedRcfResult(score, confidence + 1, totalUpdates), false },
+            new Object[] { rcfResult, new CombinedRcfResult(score + 1, confidence + 1, totalUpdates), false }, };
     }
 
     @Test
@@ -55,10 +56,10 @@ public class CombinedRcfResultTests {
 
     private Object[] hashCodeData() {
         return new Object[] {
-            new Object[] { rcfResult, new CombinedRcfResult(score, confidence), true },
-            new Object[] { rcfResult, new CombinedRcfResult(score + 1, confidence), false },
-            new Object[] { rcfResult, new CombinedRcfResult(score, confidence + 1), false },
-            new Object[] { rcfResult, new CombinedRcfResult(score + 1, confidence + 1), false }, };
+            new Object[] { rcfResult, new CombinedRcfResult(score, confidence, totalUpdates), true },
+            new Object[] { rcfResult, new CombinedRcfResult(score + 1, confidence, totalUpdates), false },
+            new Object[] { rcfResult, new CombinedRcfResult(score, confidence + 1, totalUpdates), false },
+            new Object[] { rcfResult, new CombinedRcfResult(score + 1, confidence + 1, totalUpdates), false }, };
     }
 
     @Test

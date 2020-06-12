@@ -24,16 +24,19 @@ public class CombinedRcfResult {
 
     private final double score;
     private final double confidence;
+    private final long totalUpdates;
 
     /**
      * Constructor with all arguments.
      *
      * @param score combined RCF score
      * @param confidence confidence of the score
+     * @param totalUpdates max total updates made to all rcf partitions so far
      */
-    public CombinedRcfResult(double score, double confidence) {
+    public CombinedRcfResult(double score, double confidence, long totalUpdates) {
         this.score = score;
         this.confidence = confidence;
+        this.totalUpdates = totalUpdates;
     }
 
     /**
@@ -54,6 +57,15 @@ public class CombinedRcfResult {
         return confidence;
     }
 
+    /**
+     * Return max total updates made to all rcf partitions so far
+     *
+     * @return max total updates made to all rcf partitions so far
+     */
+    public long getTotalUpdates() {
+        return totalUpdates;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o)
@@ -61,11 +73,13 @@ public class CombinedRcfResult {
         if (o == null || getClass() != o.getClass())
             return false;
         CombinedRcfResult that = (CombinedRcfResult) o;
-        return Objects.equals(this.score, that.score) && Objects.equals(this.confidence, that.confidence);
+        return Objects.equals(this.score, that.score)
+            && Objects.equals(this.confidence, that.confidence)
+            && Objects.equals(this.totalUpdates, that.totalUpdates);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(score, confidence);
+        return Objects.hash(score, confidence, totalUpdates);
     }
 }

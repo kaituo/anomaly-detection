@@ -19,6 +19,7 @@ import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorS
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.AD_RESULT_HISTORY_ROLLOVER_PERIOD;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.ANOMALY_DETECTORS_INDEX_MAPPING_FILE;
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.ANOMALY_DETECTOR_INFO_INDEX_MAPPING_FILE;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.ANOMALY_DETECTOR_JOBS_INDEX_MAPPING_FILE;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.ANOMALY_RESULTS_INDEX_MAPPING_FILE;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.REQUEST_TIMEOUT;
@@ -47,11 +48,12 @@ import org.elasticsearch.threadpool.ThreadPool;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyResult;
+import com.amazon.opendistroforelasticsearch.ad.model.DetectorInfo;
 import com.google.common.base.Charsets;
 import com.google.common.io.Resources;
 
 /**
- * This class manages creation of anomaly detector index.
+ * This class provides utility methods for various anomaly detection indices.
  */
 public class AnomalyDetectionIndices implements LocalNodeMasterListener {
 
@@ -140,6 +142,17 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
     }
 
     /**
+     * Get anomaly detector state index mapping json content.
+     *
+     * @return anomaly detector state index mapping
+     * @throws IOException IOException if mapping file can't be read correctly
+     */
+    private String getDetectorInfoMappings() throws IOException {
+        URL url = AnomalyDetectionIndices.class.getClassLoader().getResource(ANOMALY_DETECTOR_INFO_INDEX_MAPPING_FILE);
+        return Resources.toString(url, Charsets.UTF_8);
+    }
+
+    /**
      * Anomaly detector index exist or not.
      *
      * @return true if anomaly detector index exists
@@ -164,6 +177,15 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
      */
     public boolean doesAnomalyResultIndexExist() {
         return clusterService.state().metaData().hasAlias(AnomalyResult.ANOMALY_RESULT_INDEX);
+    }
+
+    /**
+     * Anomaly result index exist or not.
+     *
+     * @return true if anomaly detector index exists
+     */
+    public boolean doesDetectorInfoIndexExist() {
+        return clusterService.state().getRoutingTable().hasIndex(DetectorInfo.ANOMALY_INFO_INDEX);
     }
 
     /**
@@ -226,6 +248,18 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
         // TODO: specify replica setting
         CreateIndexRequest request = new CreateIndexRequest(AnomalyDetectorJob.ANOMALY_DETECTOR_JOB_INDEX)
             .mapping(AnomalyDetector.TYPE, getAnomalyDetectorJobMappings(), XContentType.JSON);
+        adminClient.indices().create(request, actionListener);
+    }
+
+    /**
+     * Create an index.
+     *
+     * @param actionListener action called after create index
+     * @throws IOException IOException from {@link AnomalyDetectionIndices#getAnomalyDetectorJobMappings}
+     */
+    public void initDetectorInfoIndex(ActionListener<CreateIndexResponse> actionListener) throws IOException {
+        CreateIndexRequest request = new CreateIndexRequest(DetectorInfo.ANOMALY_INFO_INDEX)
+            .mapping(AnomalyDetector.TYPE, getDetectorInfoMappings(), XContentType.JSON);
         adminClient.indices().create(request, actionListener);
     }
 

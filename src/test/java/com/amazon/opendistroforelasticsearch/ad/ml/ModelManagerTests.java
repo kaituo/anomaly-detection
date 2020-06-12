@@ -226,21 +226,21 @@ public class ModelManagerTests {
 
     private Object[] combineRcfResultsData() {
         return new Object[] {
-            new Object[] { asList(), new CombinedRcfResult(0, 0) },
-            new Object[] { asList(new RcfResult(0, 0, 0)), new CombinedRcfResult(0, 0) },
-            new Object[] { asList(new RcfResult(1, 0, 50)), new CombinedRcfResult(1, 0) },
-            new Object[] { asList(new RcfResult(1, 0, 50), new RcfResult(2, 0, 50)), new CombinedRcfResult(1.5, 0) },
+            new Object[] { asList(), new CombinedRcfResult(0, 0, 0) },
+            new Object[] { asList(new RcfResult(0, 0, 0, 0)), new CombinedRcfResult(0, 0, 0) },
+            new Object[] { asList(new RcfResult(1, 0, 50, 12)), new CombinedRcfResult(1, 0, 12) },
+            new Object[] { asList(new RcfResult(1, 0, 50, 12), new RcfResult(2, 0, 50, 13)), new CombinedRcfResult(1.5, 0, 13) },
             new Object[] {
-                asList(new RcfResult(1, 0, 40), new RcfResult(2, 0, 60), new RcfResult(3, 0, 100)),
-                new CombinedRcfResult(2.3, 0) },
-            new Object[] { asList(new RcfResult(0, 1, 100)), new CombinedRcfResult(0, 1) },
-            new Object[] { asList(new RcfResult(0, 1, 50)), new CombinedRcfResult(0, 0.5) },
-            new Object[] { asList(new RcfResult(0, 0.5, 1000)), new CombinedRcfResult(0, 0.5) },
-            new Object[] { asList(new RcfResult(0, 1, 50), new RcfResult(0, 0, 50)), new CombinedRcfResult(0, 0.5) },
-            new Object[] { asList(new RcfResult(0, 0.5, 50), new RcfResult(0, 0.5, 50)), new CombinedRcfResult(0, 0.5) },
+                asList(new RcfResult(1, 0, 40, 12), new RcfResult(2, 0, 60, 13), new RcfResult(3, 0, 100, 14)),
+                new CombinedRcfResult(2.3, 0, 14) },
+            new Object[] { asList(new RcfResult(0, 1, 100, 5)), new CombinedRcfResult(0, 1, 5) },
+            new Object[] { asList(new RcfResult(0, 1, 50, 100)), new CombinedRcfResult(0, 0.5, 100) },
+            new Object[] { asList(new RcfResult(0, 0.5, 1000, 10000)), new CombinedRcfResult(0, 0.5, 10000) },
+            new Object[] { asList(new RcfResult(0, 1, 50, 12), new RcfResult(0, 0, 50, 12)), new CombinedRcfResult(0, 0.5, 12) },
+            new Object[] { asList(new RcfResult(0, 0.5, 50, 101), new RcfResult(0, 0.5, 50, 101)), new CombinedRcfResult(0, 0.5, 101) },
             new Object[] {
-                asList(new RcfResult(0, 1, 20), new RcfResult(0, 1, 30), new RcfResult(0, 0.5, 50)),
-                new CombinedRcfResult(0, 0.75) }, };
+                asList(new RcfResult(0, 1, 20, 60), new RcfResult(0, 1, 30, 70), new RcfResult(0, 0.5, 50, 80)),
+                new CombinedRcfResult(0, 0.75, 80) }, };
     }
 
     @Test
@@ -336,7 +336,7 @@ public class ModelManagerTests {
 
         RcfResult result = modelManager.getRcfResult(detectorId, rcfModelId, point);
 
-        RcfResult expected = new RcfResult(score, 0, numTrees);
+        RcfResult expected = new RcfResult(score, 0, numTrees, numSamples);
         assertEquals(expected, result);
 
         when(forest.getTotalUpdates()).thenReturn(numSamples + 1L);
@@ -391,7 +391,7 @@ public class ModelManagerTests {
         ActionListener<RcfResult> listener = mock(ActionListener.class);
         modelManager.getRcfResult(detectorId, rcfModelId, point, listener);
 
-        RcfResult expected = new RcfResult(score, 0, numTrees);
+        RcfResult expected = new RcfResult(score, 0, numTrees, numSamples);
         verify(listener).onResponse(eq(expected));
 
         when(forest.getTotalUpdates()).thenReturn(numSamples + 1L);

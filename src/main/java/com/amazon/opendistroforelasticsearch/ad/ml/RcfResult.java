@@ -25,6 +25,7 @@ public class RcfResult {
     private final double score;
     private final double confidence;
     private final int forestSize;
+    private final long totalUpdates;
 
     /**
      * Constructor with all arguments.
@@ -32,11 +33,13 @@ public class RcfResult {
      * @param score RCF score
      * @param confidence RCF confidence
      * @param forestSize number of RCF trees used for the score
+     * @param totalUpdates total updates made to rcf partitions so far
      */
-    public RcfResult(double score, double confidence, int forestSize) {
+    public RcfResult(double score, double confidence, int forestSize, long totalUpdates) {
         this.score = score;
         this.confidence = confidence;
         this.forestSize = forestSize;
+        this.totalUpdates = totalUpdates;
     }
 
     /**
@@ -66,6 +69,15 @@ public class RcfResult {
         return forestSize;
     }
 
+    /**
+     * Return the number of RCF forest updates
+     *
+     * @return the number of RCF forest updates
+     */
+    public long getTotalUpdates() {
+        return totalUpdates;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o)
@@ -75,11 +87,12 @@ public class RcfResult {
         RcfResult that = (RcfResult) o;
         return Objects.equals(this.score, that.score)
             && Objects.equals(this.confidence, that.confidence)
-            && Objects.equals(this.forestSize, that.forestSize);
+            && Objects.equals(this.forestSize, that.forestSize)
+            && Objects.equals(this.totalUpdates, that.totalUpdates);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(score, confidence, forestSize);
+        return Objects.hash(score, confidence, forestSize, totalUpdates);
     }
 }

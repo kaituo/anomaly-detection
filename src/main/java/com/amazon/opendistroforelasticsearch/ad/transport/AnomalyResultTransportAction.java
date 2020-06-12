@@ -74,6 +74,7 @@ import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings
 import com.amazon.opendistroforelasticsearch.ad.settings.EnabledSetting;
 import com.amazon.opendistroforelasticsearch.ad.stats.ADStats;
 import com.amazon.opendistroforelasticsearch.ad.stats.StatNames;
+import com.amazon.opendistroforelasticsearch.ad.transport.handler.DetectorInfoHandler;
 import com.amazon.opendistroforelasticsearch.ad.util.ColdStartRunner;
 
 public class AnomalyResultTransportAction extends HandledTransportAction<ActionRequest, AnomalyResultResponse> {
@@ -103,6 +104,7 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
     private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final ADStats adStats;
     private final ADCircuitBreakerService adCircuitBreakerService;
+    private final DetectorInfoHandler detectorInfoHandler;
 
     @Inject
     public AnomalyResultTransportAction(
@@ -117,7 +119,8 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
         ClusterService clusterService,
         IndexNameExpressionResolver indexNameExpressionResolver,
         ADCircuitBreakerService adCircuitBreakerService,
-        ADStats adStats
+        ADStats adStats,
+        DetectorInfoHandler detectorInfoHandler
     ) {
         super(AnomalyResultAction.NAME, transportService, actionFilters, AnomalyResultRequest::new);
         this.transportService = transportService;
@@ -135,6 +138,7 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
         this.indexNameExpressionResolver = indexNameExpressionResolver;
         this.adCircuitBreakerService = adCircuitBreakerService;
         this.adStats = adStats;
+        this.detectorInfoHandler = detectorInfoHandler;
     }
 
     private List<FeatureData> getFeatureData(double[] currentFeature, AnomalyDetector detector) {
@@ -286,6 +290,20 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
             }
 
             if (!featureOptional.getProcessedFeatures().isPresent()) {
+                stateManager.getDetectorCheckpoint(adID, ActionListener.wrap(checkpointExists -> {
+                    if (!checkpointExists) {
+                        LOG.info("Trigger cold start for {}", adID);
+                        globalRunner.compute(new ColdStartJob(detector));
+                    }
+                }, exception -> {
+                    Throwable cause = ExceptionsHelper.unwrapCause(exception);
+                    if (cause instanceof IndexNotFoundException) {
+                        LOG.info("Trigger cold start for {}", adID);
+                        globalRunner.compute(new ColdStartJob(detector));
+                    } else {
+                        LOG.error(String.format("Fail to get checkpoint state for %s", adID), exception);
+                    }
+                }));
                 if (!featureOptional.getUnprocessedFeatures().isPresent()) {
                     // Feature not available is common when we have data holes. Respond empty response
                     // so that alerting will not print stack trace to avoid bloating our logs.
@@ -402,7 +420,7 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
         AnomalyDetectionException exp = failure.get();
         if (exp != null) {
             if (exp instanceof ResourceNotFoundException) {
-                LOG.info("Cold start for {}", detector.getDetectorId());
+                LOG.info("Trigger cold start for {}", detector.getDetectorId());
                 globalRunner.compute(new ColdStartJob(detector));
                 return true;
             } else {
@@ -471,7 +489,7 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
     private CombinedRcfResult getCombinedResult(List<RCFResultResponse> rcfResults) {
         List<RcfResult> rcfResultLib = new ArrayList<>();
         for (RCFResultResponse result : rcfResults) {
-            rcfResultLib.add(new RcfResult(result.getRCFScore(), result.getConfidence(), result.getForestSize()));
+            rcfResultLib.add(new RcfResult(result.getRCFScore(), result.getConfidence(), result.getForestSize(), result.getTotalUpdates()));
         }
         return modelManager.combineRcfResults(rcfResultLib);
     }
@@ -581,6 +599,7 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                 }
 
                 CombinedRcfResult combinedResult = getCombinedResult(rcfResults);
+                detectorInfoHandler.saveRcfUpdates(combinedResult.getTotalUpdates(), adID);
                 double combinedScore = combinedResult.getScore();
 
                 final AtomicReference<AnomalyResultResponse> anomalyResultResponse = new AtomicReference<>();
@@ -798,13 +817,16 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
 
         @Override
         public Boolean call() {
+            String detectorId = detector.getDetectorId();
             try {
                 Optional<double[][]> traingData = featureManager.getColdStartData(detector);
                 if (traingData.isPresent()) {
-                    modelManager.trainModel(detector, traingData.get());
+                    double[][] trainingPoints = traingData.get();
+                    modelManager.trainModel(detector, trainingPoints);
+                    detectorInfoHandler.saveRcfUpdates(trainingPoints.length, detectorId);
                     return true;
                 } else {
-                    throw new EndRunException(detector.getDetectorId(), "Cannot get training data", false);
+                    throw new EndRunException(detectorId, "Cannot get training data", false);
                 }
 
             } catch (ElasticsearchTimeoutException timeoutEx) {

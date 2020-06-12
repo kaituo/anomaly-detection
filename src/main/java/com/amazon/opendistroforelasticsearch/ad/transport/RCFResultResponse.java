@@ -27,14 +27,17 @@ public class RCFResultResponse extends ActionResponse implements ToXContentObjec
     public static final String RCF_SCORE_JSON_KEY = "rcfScore";
     public static final String CONFIDENCE_JSON_KEY = "confidence";
     public static final String FOREST_SIZE_JSON_KEY = "forestSize";
+    public static final String TOTAL_UPDATES_KEY = "totalUpdates";
     private double rcfScore;
     private double confidence;
     private int forestSize;
+    private long totalUpdates;
 
-    public RCFResultResponse(double rcfScore, double confidence, int forestSize) {
+    public RCFResultResponse(double rcfScore, double confidence, int forestSize, long totalUpdates) {
         this.rcfScore = rcfScore;
         this.confidence = confidence;
         this.forestSize = forestSize;
+        this.totalUpdates = totalUpdates;
     }
 
     public RCFResultResponse(StreamInput in) throws IOException {
@@ -42,6 +45,7 @@ public class RCFResultResponse extends ActionResponse implements ToXContentObjec
         rcfScore = in.readDouble();
         confidence = in.readDouble();
         forestSize = in.readVInt();
+        totalUpdates = in.readVLong();
     }
 
     public double getRCFScore() {
@@ -56,11 +60,16 @@ public class RCFResultResponse extends ActionResponse implements ToXContentObjec
         return forestSize;
     }
 
+    public long getTotalUpdates() {
+        return totalUpdates;
+    }
+
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         out.writeDouble(rcfScore);
         out.writeDouble(confidence);
         out.writeVInt(forestSize);
+        out.writeVLong(totalUpdates);
     }
 
     @Override
@@ -69,6 +78,7 @@ public class RCFResultResponse extends ActionResponse implements ToXContentObjec
         builder.field(RCF_SCORE_JSON_KEY, rcfScore);
         builder.field(CONFIDENCE_JSON_KEY, confidence);
         builder.field(FOREST_SIZE_JSON_KEY, forestSize);
+        builder.field(TOTAL_UPDATES_KEY, totalUpdates);
         builder.endObject();
         return builder;
     }
