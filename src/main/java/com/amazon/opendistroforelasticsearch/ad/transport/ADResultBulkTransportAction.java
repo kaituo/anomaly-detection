@@ -58,6 +58,7 @@ public class ADResultBulkTransportAction extends HandledTransportAction<ADResult
     private float hardLimit;
     private String indexName;
     private Client client;
+    private Random random;
 
     @Inject
     public ADResultBulkTransportAction(
@@ -77,6 +78,8 @@ public class ADResultBulkTransportAction extends HandledTransportAction<ADResult
         this.client = client;
         clusterService.getClusterSettings().addSettingsUpdateConsumer(INDEX_PRESSURE_SOFT_LIMIT, it -> softLimit = it);
         clusterService.getClusterSettings().addSettingsUpdateConsumer(INDEX_PRESSURE_HARD_LIMIT, it -> hardLimit = it);
+        // random seed is 42. Can be any number
+        this.random = new Random(42);
     }
 
     @Override
@@ -87,7 +90,6 @@ public class ADResultBulkTransportAction extends HandledTransportAction<ADResult
         // all non-zero anomaly grade index requests and index zero anomaly grade index requests with probability (1 - index pressure).
         long totalBytes = indexingPressure.getCurrentCombinedCoordinatingAndPrimaryBytes() + indexingPressure.getCurrentReplicaBytes();
         float indexingPressurePercent = (float) totalBytes / primaryAndCoordinatingLimits;
-
         List<AnomalyResult> results = request.getAnomalyResults();
 
         if (results == null || results.size() < 1) {
@@ -101,19 +103,17 @@ public class ADResultBulkTransportAction extends HandledTransportAction<ADResult
                 addResult(bulkRequest, result);
             }
         } else if (indexingPressurePercent <= hardLimit) {
-            // exceed soft limit (60%) but smaller than hard limit (100%)
-            // random seed is 42. Can be any number
-            Random random = new Random(42);
+            // exceed soft limit (60%) but smaller than hard limit (90%)
             float acceptProbability = 1 - indexingPressurePercent;
             for (AnomalyResult result : results) {
-                if (result.getAnomalyGrade() > 0 || random.nextFloat() < acceptProbability) {
+                if (isHighPriorityRequest(result) || random.nextFloat() < acceptProbability) {
                     addResult(bulkRequest, result);
                 }
             }
         } else {
-            // if exceeding hard limit, only index non-zero grade result
+            // if exceeding hard limit, only index non-zero grade or error result
             for (AnomalyResult result : results) {
-                if (result.getAnomalyGrade() > 0) {
+                if (isHighPriorityRequest(result)) {
                     addResult(bulkRequest, result);
                 }
             }
@@ -127,6 +127,10 @@ public class ADResultBulkTransportAction extends HandledTransportAction<ADResult
         } else {
             listener.onResponse(new ADResultBulkResponse());
         }
+    }
+
+    private boolean isHighPriorityRequest(AnomalyResult result) {
+        return result.getAnomalyGrade() > 0 || result.getError() != null;
     }
 
     private void addResult(BulkRequest bulkRequest, AnomalyResult result) {

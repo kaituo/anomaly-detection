@@ -22,13 +22,17 @@ import org.apache.commons.lang.exception.ExceptionUtils;
 import org.apache.logging.log4j.core.util.Throwables;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ExceptionsHelper;
+import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.NoShardAvailableActionException;
 import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.action.support.TransportActions;
 import org.elasticsearch.action.support.replication.ReplicationResponse;
 import org.elasticsearch.common.io.stream.NotSerializableExceptionWrapper;
+import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.rest.RestStatus;
 
 import com.amazon.opendistroforelasticsearch.ad.common.exception.AnomalyDetectionException;
+import com.amazon.opendistroforelasticsearch.ad.common.exception.EndRunException;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.LimitExceededException;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.ResourceNotFoundException;
 
@@ -140,5 +144,61 @@ public class ExceptionUtil {
 
     public static boolean isRetryAble(RestStatus status) {
         return RETRYABLE_STATUS.contains(status);
+    }
+
+    public static boolean isNotFound(Exception e) {
+        Throwable cause = ExceptionsHelper.unwrapCause(e);
+        RestStatus status = ExceptionsHelper.status(cause);
+        return status == RestStatus.NOT_FOUND;
+    }
+
+    /**
+     * Wrap a listener to return the given exception no matter what
+     * @param <T> The type of listener response
+     * @param original Original listener
+     * @param exceptionToReturn The exception to return
+     * @param detectorId Detector Id
+     * @return the wrapped listener
+     */
+    public static <T> ActionListener<T> wrapListener(ActionListener<T> original, Exception exceptionToReturn, String detectorId) {
+        return ActionListener
+            .wrap(
+                r -> { original.onFailure(exceptionToReturn); },
+                e -> { original.onFailure(selectHigherPriorityException(exceptionToReturn, e)); }
+            );
+    }
+
+    /**
+     * Return an exception that has higher priority.
+     * If an exception is EndRunException while another one is not, the former has
+     *  higher priority.
+     * If both exceptions are EndRunException, the one with end now true has higher
+     *  priority.
+     * Otherwise, return the second given exception.
+     * @param exception1 Exception 1
+     * @param exception2 Exception 2
+     * @return high priority exception
+     */
+    public static Exception selectHigherPriorityException(Exception exception1, Exception exception2) {
+        if (exception1 instanceof EndRunException) {
+            // we have already had EndRunException. Don't replace it with something less severe
+            EndRunException endRunException = (EndRunException) exception1;
+            if (endRunException.isEndNow()) {
+                // don't proceed if recorded exception is ending now
+                return exception1;
+            }
+            if (false == (exception2 instanceof EndRunException) || false == ((EndRunException) exception2).isEndNow()) {
+                // don't proceed if the giving exception is not ending now
+                return exception1;
+            }
+        }
+        return exception2;
+    }
+
+    public static boolean isIndexNotAvailable(Exception e) {
+        if (e == null) {
+            return false;
+        }
+        return e instanceof IndexNotFoundException || e instanceof NoShardAvailableActionException;
     }
 }

@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
@@ -46,7 +47,9 @@ import org.elasticsearch.threadpool.ThreadPoolStats;
 import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorPlugin;
 import com.amazon.opendistroforelasticsearch.ad.ExpiringState;
 import com.amazon.opendistroforelasticsearch.ad.MaintenanceState;
+import com.amazon.opendistroforelasticsearch.ad.NodeStateManager;
 import com.amazon.opendistroforelasticsearch.ad.breaker.ADCircuitBreakerService;
+import com.amazon.opendistroforelasticsearch.ad.common.exception.AnomalyDetectionException;
 
 /**
  * HCAD can bombard ES with “thundering herd” traffic, in which many entities
@@ -113,6 +116,7 @@ public abstract class RateLimitedQueue<RequestType extends QueuedRequest> implem
     private float lowSegmentPruneRatio;
     protected int maintenanceFreqConstant;
     private final Duration stateTtl;
+    protected final NodeStateManager nodeStateManager;
 
     public RateLimitedQueue(
         String queueName,
@@ -129,7 +133,8 @@ public abstract class RateLimitedQueue<RequestType extends QueuedRequest> implem
         float mediumSegmentPruneRatio,
         float lowSegmentPruneRatio,
         int maintenanceFreqConstant,
-        Duration stateTtl
+        Duration stateTtl,
+        NodeStateManager nodeStateManager
     ) {
         this.heapSize = heapSizeInBytes;
         this.singleRequestSize = singleRequestSizeInBytes;
@@ -156,6 +161,7 @@ public abstract class RateLimitedQueue<RequestType extends QueuedRequest> implem
         this.coolDownMinutes = (int) (COOLDOWN_MINUTES.get(settings).getMinutes());
         this.maintenanceFreqConstant = maintenanceFreqConstant;
         this.stateTtl = stateTtl;
+        this.nodeStateManager = nodeStateManager;
     }
 
     protected String getQueueName() {
@@ -425,7 +431,16 @@ public abstract class RateLimitedQueue<RequestType extends QueuedRequest> implem
                 }
             }, new TimeValue(coolDownMinutes, TimeUnit.MINUTES), AnomalyDetectorPlugin.AD_THREAD_POOL_NAME);
         } else {
-            triggerProcess();
+            try {
+                triggerProcess();
+            } catch (Exception e) {
+                LOG.error(String.format(Locale.ROOT, "Failed to process requests from %s", getQueueName()), e);
+                if (e != null && e instanceof AnomalyDetectionException) {
+                    AnomalyDetectionException adExep = (AnomalyDetectionException) e;
+                    nodeStateManager.setException(adExep.getAnomalyDetectorId(), adExep);
+                }
+            }
+
         }
     }
 

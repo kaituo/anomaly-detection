@@ -56,7 +56,6 @@ public class ResultWriteQueue extends BatchQueue<ResultWriteRequest, ADResultBul
 
     private final MultiEntityResultHandler resultHandler;
     private NamedXContentRegistry xContentRegistry;
-    private final NodeStateManager stateManager;
 
     public ResultWriteQueue(
         long heapSizeInBytes,
@@ -98,16 +97,17 @@ public class ResultWriteQueue extends BatchQueue<ResultWriteRequest, ADResultBul
             RESULT_WRITE_QUEUE_CONCURRENCY,
             executionTtl,
             RESULT_WRITE_QUEUE_BATCH_SIZE,
-            stateTtl
+            stateTtl,
+            stateManager
         );
         this.resultHandler = resultHandler;
         this.xContentRegistry = xContentRegistry;
-        this.stateManager = stateManager;
     }
 
     @Override
     protected void executeBatchRequest(ADResultBulkRequest request, ActionListener<ADResultBulkResponse> listener) {
         if (request.numberOfActions() < 1) {
+            listener.onResponse(null);
             return;
         }
         resultHandler.flush(request, listener);
@@ -128,7 +128,7 @@ public class ResultWriteQueue extends BatchQueue<ResultWriteRequest, ADResultBul
         ADResultBulkRequest bulkRequest
     ) {
         return ActionListener.wrap(adResultBulkResponse -> {
-            if (false == adResultBulkResponse.getRetryRequests().isPresent()) {
+            if (adResultBulkResponse == null || false == adResultBulkResponse.getRetryRequests().isPresent()) {
                 // all successful
                 return;
             }
@@ -144,6 +144,9 @@ public class ResultWriteQueue extends BatchQueue<ResultWriteRequest, ADResultBul
                 // retry all of them
                 super.putAll(toProcess);
             } else {
+                for (ResultWriteRequest request : toProcess) {
+                    nodeStateManager.setException(request.getDetectorId(), exception);
+                }
                 LOG.error("Fail to save results", exception);
             }
         });
@@ -161,7 +164,7 @@ public class ResultWriteQueue extends BatchQueue<ResultWriteRequest, ADResultBul
         }
         AnomalyResult result = resultToRetry.get();
         String detectorId = result.getDetectorId();
-        stateManager.getAnomalyDetector(detectorId, onGetDetector(requestToRetry, index, detectorId, result));
+        nodeStateManager.getAnomalyDetector(detectorId, onGetDetector(requestToRetry, index, detectorId, result));
     }
 
     private ActionListener<Optional<AnomalyDetector>> onGetDetector(
@@ -211,8 +214,9 @@ public class ResultWriteQueue extends BatchQueue<ResultWriteRequest, ADResultBul
                 XContentParser xContentParser = XContentHelper
                     .createParser(xContentRegistry, LoggingDeprecationHandler.INSTANCE, indexSource, indexContentType)
             ) {
-                // the first character is null.  Without skipping it, we get
-                // org.elasticsearch.common.ParsingException: Failed to parse object: expecting token of type [START_OBJECT] but found [null]
+                // the first character is null. Without skipping it, we get
+                // org.elasticsearch.common.ParsingException: Failed to parse object: expecting token of type [START_OBJECT] but found
+                // [null]
                 xContentParser.nextToken();
                 return Optional.of(AnomalyResult.parse(xContentParser));
             }

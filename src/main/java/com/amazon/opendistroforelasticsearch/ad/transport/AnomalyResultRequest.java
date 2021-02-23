@@ -33,7 +33,7 @@ import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 
 public class AnomalyResultRequest extends ActionRequest implements ToXContentObject {
     private String adID;
@@ -93,9 +93,9 @@ public class AnomalyResultRequest extends ActionRequest implements ToXContentObj
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject();
-        builder.field(CommonMessageAttributes.ID_JSON_KEY, adID);
-        builder.field(CommonMessageAttributes.START_JSON_KEY, start);
-        builder.field(CommonMessageAttributes.END_JSON_KEY, end);
+        builder.field(CommonName.ID_JSON_KEY, adID);
+        builder.field(CommonName.START_JSON_KEY, start);
+        builder.field(CommonName.END_JSON_KEY, end);
         builder.endObject();
         return builder;
     }

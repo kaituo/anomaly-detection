@@ -15,6 +15,8 @@
 
 package com.amazon.opendistroforelasticsearch.ad.ratelimit;
 
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
+
 public class EntityFeatureRequest extends EntityRequest {
     private final double[] currentFeature;
     private final long dataStartTimeMillis;
@@ -23,12 +25,11 @@ public class EntityFeatureRequest extends EntityRequest {
         long expirationEpochMs,
         String detectorId,
         SegmentPriority priority,
-        String entityName,
-        String modelId,
+        Entity entity,
         double[] currentFeature,
         long dataStartTimeMs
     ) {
-        super(expirationEpochMs, detectorId, priority, entityName, modelId);
+        super(expirationEpochMs, detectorId, priority, entity);
         this.currentFeature = currentFeature;
         this.dataStartTimeMillis = dataStartTimeMs;
     }

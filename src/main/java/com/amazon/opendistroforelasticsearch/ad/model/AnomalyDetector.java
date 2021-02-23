@@ -15,7 +15,6 @@
 
 package com.amazon.opendistroforelasticsearch.ad.model;
 
-import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.CATEGORY_FIELD_LIMIT;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.DEFAULT_MULTI_ENTITY_SHINGLE;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.DEFAULT_SHINGLE_SIZE;
 import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpectedToken;
@@ -48,6 +47,7 @@ import com.amazon.opendistroforelasticsearch.ad.annotation.Generated;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonValue;
+import com.amazon.opendistroforelasticsearch.ad.settings.NumericSetting;
 import com.amazon.opendistroforelasticsearch.ad.util.ParseUtils;
 import com.amazon.opendistroforelasticsearch.commons.authuser.User;
 import com.google.common.base.Objects;
@@ -203,8 +203,9 @@ public class AnomalyDetector implements Writeable, ToXContentObject {
         if (shingleSize != null && shingleSize < 1) {
             throw new IllegalArgumentException("Shingle size must be a positive integer");
         }
-        if (categoryFields != null && categoryFields.size() > CATEGORY_FIELD_LIMIT) {
-            throw new IllegalArgumentException(CommonErrorMessages.CATEGORICAL_FIELD_NUMBER_SURPASSED + CATEGORY_FIELD_LIMIT);
+        int maxCategoryFields = NumericSetting.maxCategoricalFields();
+        if (categoryFields != null && categoryFields.size() > maxCategoryFields) {
+            throw new IllegalArgumentException(CommonErrorMessages.getTooManyCategoricalFieldErr(maxCategoryFields));
         }
         if (((IntervalTimeConfiguration) detectionInterval).getInterval() <= 0) {
             throw new IllegalArgumentException("Detection interval must be a positive integer");

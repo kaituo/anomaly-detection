@@ -25,8 +25,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -45,6 +47,7 @@ import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.cluster.metadata.AliasMetadata;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.http.HttpRequest;
@@ -66,6 +69,7 @@ import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyResult;
 import com.amazon.opendistroforelasticsearch.ad.model.DetectorInternalState;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 
 public class AbstractADTest extends ESTestCase {
 
@@ -213,17 +217,33 @@ public class AbstractADTest extends ESTestCase {
         threadPool = null;
     }
 
-    public void setupTestNodes(Settings settings, TransportInterceptor transportInterceptor) {
+    /**
+     *
+     * @param transportInterceptor Interceptor to for transport requests. Used
+     *  to mock transport layer.
+     * @param nodeSettings node override of setting
+     * @param setting the supported setting set.
+     */
+    public void setupTestNodes(TransportInterceptor transportInterceptor, final Settings nodeSettings, Setting<?>... setting) {
         nodesCount = randomIntBetween(2, 10);
         testNodes = new FakeNode[nodesCount];
+        Set<Setting<?>> settingSet = new HashSet<>(Arrays.asList(setting));
         for (int i = 0; i < testNodes.length; i++) {
-            testNodes[i] = new FakeNode("node" + i, threadPool, settings, transportInterceptor);
+            testNodes[i] = new FakeNode("node" + i, threadPool, nodeSettings, settingSet, transportInterceptor);
         }
         FakeNode.connectNodes(testNodes);
     }
 
-    public void setupTestNodes(Settings settings) {
-        setupTestNodes(settings, TransportService.NOOP_TRANSPORT_INTERCEPTOR);
+    public void setupTestNodes(Setting<?>... setting) {
+        setupTestNodes(TransportService.NOOP_TRANSPORT_INTERCEPTOR, Settings.EMPTY, setting);
+    }
+
+    public void setupTestNodes(Settings nodeSettings) {
+        setupTestNodes(TransportService.NOOP_TRANSPORT_INTERCEPTOR, nodeSettings);
+    }
+
+    public void setupTestNodes(TransportInterceptor transportInterceptor) {
+        setupTestNodes(transportInterceptor, Settings.EMPTY);
     }
 
     public void tearDownTestNodes() {
@@ -330,7 +350,7 @@ public class AbstractADTest extends ESTestCase {
         }, null);
     }
 
-    protected boolean areEqualWithArrayValue(Map<String, double[]> first, Map<String, double[]> second) {
+    protected boolean areEqualWithArrayValue(Map<Entity, double[]> first, Map<Entity, double[]> second) {
         if (first.size() != second.size()) {
             return false;
         }

@@ -82,13 +82,14 @@ public final class AnomalyDetectorSettings {
             Setting.Property.Dynamic
         );
 
-    public static final Setting<Long> AD_RESULT_HISTORY_MAX_DOCS = Setting
+    public static final Setting<Long> AD_RESULT_HISTORY_MAX_DOCS_PER_SHARD = Setting
         .longSetting(
-            "opendistro.anomaly_detection.ad_result_history_max_docs",
-            // Total documents in primary replica.
-            // A single result doc is roughly 46.8 bytes (measured by experiments).
-            // 1.35 billion docs is about 65 GB. We choose 65 GB
-            // because we have 1 shard at least. One shard can have at most 65 GB.
+            "opendistro.anomaly_detection.ad_result_history_max_docs_per_shard",
+            // Total documents in the primary shards.
+            // Note the count is for Lucene docs. Lucene considers a nested
+            // doc a doc too. One result corresponding to 4 Lucene docs.
+            // A single Lucene doc is roughly 46.8 bytes (measured by experiments).
+            // 1.35 billion docs is about 65 GB. One shard can have at most 65 GB.
             1_350_000_000L,
             0L,
             Setting.Property.NodeScope,
@@ -244,18 +245,18 @@ public final class AnomalyDetectorSettings {
     // TODO (kaituo): change to 4
     public static final int DEFAULT_MULTI_ENTITY_SHINGLE = 1;
 
-    // how many categorical fields we support
-    public static final int CATEGORY_FIELD_LIMIT = 1;
-
     public static final int MULTI_ENTITY_NUM_TREES = 10;
 
-    // cache related
+    // With compact rcf, rcf with 30 trees and shingle size 4 is of 500KB.
+    // The recommended max heap size is 32 GB. Even if users use all of the heap
+    // for AD, the max number of entity model cannot surpass 3.2 * 10^10 / 5*10^5 = 6.4 * 10 ^4
+    // That's why I am using 60_000 as the max limit.
     public static final Setting<Integer> DEDICATED_CACHE_SIZE = Setting
         .intSetting(
             "opendistro.anomaly_detection.dedicated_cache_size",
             10,
-            1,
-            100_000_000,
+            0,
+            60_000,
             Setting.Property.NodeScope,
             Setting.Property.Dynamic
         );
@@ -274,25 +275,14 @@ public final class AnomalyDetectorSettings {
 
     public static final double DOOR_KEEPER_FAULSE_POSITIVE_RATE = 0.01;
 
-    // Increase the value will adding pressure to indexing anomaly results and our feature query
-    public static final Setting<Integer> MAX_ENTITIES_PER_QUERY = Setting
-        .intSetting(
-            "opendistro.anomaly_detection.max_entities_per_query",
-            1000,
-            1,
-            100_000_000,
-            Setting.Property.NodeScope,
-            Setting.Property.Dynamic
-        );
-
-    // Default number of entities retrieved for Preview API
-    public static final int DEFAULT_ENTITIES_FOR_PREVIEW = 30;
-
     // Maximum number of entities retrieved for Preview API
+    // Setting default value to 30 causes heavy GC (half of the time is GC on my
+    // 1GB heap machine). Default value 10 won't cause heavy GC.
+    // Since every entity is likely to give some anomalies, 10 is enough.
     public static final Setting<Integer> MAX_ENTITIES_FOR_PREVIEW = Setting
         .intSetting(
             "opendistro.anomaly_detection.max_entities_for_preview",
-            DEFAULT_ENTITIES_FOR_PREVIEW,
+            10,
             1,
             1000,
             Setting.Property.NodeScope,
@@ -379,9 +369,28 @@ public final class AnomalyDetectorSettings {
     // rate-limiting queue parameters
     // ======================================
     // the percentage of heap usage allowed for queues holding small requests
-    public static final Setting<Float> SMALL_REQUEST_QUEUE_MAX_HEAP_PERCENT = Setting
+    // set it to 0 to disable the queue
+    public static final Setting<Float> COLD_ENTITY_QUEUE_MAX_HEAP_PERCENT = Setting
         .floatSetting(
-            "opendistro.anomaly_detection.small_request_queue_max_heap_percent",
+            "opendistro.anomaly_detection.cold_entity_queue_max_heap_percent",
+            0.001f,
+            0.0f,
+            Setting.Property.NodeScope,
+            Setting.Property.Dynamic
+        );
+
+    public static final Setting<Float> CHECKPOINT_READ_QUEUE_MAX_HEAP_PERCENT = Setting
+        .floatSetting(
+            "opendistro.anomaly_detection.checkpoint_read_queue_max_heap_percent",
+            0.001f,
+            0.0f,
+            Setting.Property.NodeScope,
+            Setting.Property.Dynamic
+        );
+
+    public static final Setting<Float> ENTITY_COLD_START_QUEUE_MAX_HEAP_PERCENT = Setting
+        .floatSetting(
+            "opendistro.anomaly_detection.entity_cold_start_queue_max_heap_percent",
             0.001f,
             0.0f,
             Setting.Property.NodeScope,
@@ -389,9 +398,19 @@ public final class AnomalyDetectorSettings {
         );
 
     // the percentage of heap usage allowed for queues holding large requests
-    public static final Setting<Float> BIG_REQUEST_QUEUE_MAX_HEAP_PERCENT = Setting
+    // set it to 0 to disable the queue
+    public static final Setting<Float> CHECKPOINT_WRITE_QUEUE_MAX_HEAP_PERCENT = Setting
         .floatSetting(
-            "opendistro.anomaly_detection.big_request_queue_max_heap_percent",
+            "opendistro.anomaly_detection.checkpoint_write_queue_max_heap_percent",
+            0.01f,
+            0.0f,
+            Setting.Property.NodeScope,
+            Setting.Property.Dynamic
+        );
+
+    public static final Setting<Float> RESULT_WRITE_QUEUE_MAX_HEAP_PERCENT = Setting
+        .floatSetting(
+            "opendistro.anomaly_detection.result_write_queue_max_heap_percent",
             0.01f,
             0.0f,
             Setting.Property.NodeScope,
@@ -582,6 +601,29 @@ public final class AnomalyDetectorSettings {
 
     public static final float LOW_SEGMENT_PRUNE_RATIO = 0.3f;
 
-    // maintain queues with 1/100 probability
-    public static final int QUEUE_MAINTENANCE_FREQ_CONSTANT = 100;
+    // expensive maintenance (e.g., queue maintenance) with 1/10000 probability
+    public static final int MAINTENANCE_FREQ_CONSTANT = 10000;
+
+    // ======================================
+    // pagination setting
+    // ======================================
+    // pagination size
+    public static final Setting<Integer> PAGE_SIZE = Setting
+        .intSetting("opendistro.anomaly_detection.page_size", 1_000, 0, 10_000, Setting.Property.NodeScope, Setting.Property.Dynamic);
+
+    // within an interval, how many percents are used to process requests.
+    // 1.0 means we use all of the detection interval to process requests.
+    // to ensure we don't block next interval, it is better to set it less than 1.0.
+    public static final float INTERVAL_RATIO_FOR_REQUESTS = 0.8f;
+
+    // Increase the value will adding pressure to indexing anomaly results and our feature query
+    public static final Setting<Integer> MAX_ENTITIES_PER_INTERVAL = Setting
+        .intSetting(
+            "opendistro.anomaly_detection.max_entities_per_interval",
+            10_000,
+            0,
+            1_000_000,
+            Setting.Property.NodeScope,
+            Setting.Property.Dynamic
+        );
 }

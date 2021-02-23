@@ -31,6 +31,7 @@ import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorPlugin;
+import com.amazon.opendistroforelasticsearch.ad.NodeStateManager;
 import com.amazon.opendistroforelasticsearch.ad.breaker.ADCircuitBreakerService;
 
 /**
@@ -62,6 +63,7 @@ public class ColdEntityQueue extends RateLimitedQueue<EntityFeatureRequest> {
         int batchSize,
         CheckpointReadQueue checkpointReadQueue,
         Duration stateTtl,
+        NodeStateManager nodeStateManager,
         int expectedExecutionTimeInSecsPerRequest
     ) {
         super(
@@ -79,7 +81,8 @@ public class ColdEntityQueue extends RateLimitedQueue<EntityFeatureRequest> {
             mediumSegmentPruneRatio,
             lowSegmentPruneRatio,
             maintenanceFreqConstant,
-            stateTtl
+            stateTtl,
+            nodeStateManager
         );
 
         this.batchSize = batchSize;

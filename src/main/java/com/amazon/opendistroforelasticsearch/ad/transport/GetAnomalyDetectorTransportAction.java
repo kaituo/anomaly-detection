@@ -61,6 +61,7 @@ import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob;
 import com.amazon.opendistroforelasticsearch.ad.model.DetectorProfile;
 import com.amazon.opendistroforelasticsearch.ad.model.DetectorProfileName;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.model.EntityProfileName;
 import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
 import com.amazon.opendistroforelasticsearch.ad.task.ADTaskManager;
@@ -148,7 +149,7 @@ public class GetAnomalyDetectorTransportAction extends HandledTransportAction<Ge
         String detectorID = request.getDetectorID();
         String typesStr = request.getTypeStr();
         String rawPath = request.getRawPath();
-        String entityValue = request.getEntityValue();
+        Entity entityValue = request.getEntityValue();
         boolean all = request.isAll();
         boolean returnJob = request.isReturnJob();
         boolean returnTask = request.isReturnTask();

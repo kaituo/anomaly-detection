@@ -16,17 +16,18 @@
 package com.amazon.opendistroforelasticsearch.ad.rest;
 
 import static com.amazon.opendistroforelasticsearch.ad.util.RestHandlerUtils.DETECTOR_ID;
-import static com.amazon.opendistroforelasticsearch.ad.util.RestHandlerUtils.ENTITY;
 import static com.amazon.opendistroforelasticsearch.ad.util.RestHandlerUtils.PROFILE;
 import static com.amazon.opendistroforelasticsearch.ad.util.RestHandlerUtils.TYPE;
 
 import java.io.IOException;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.elasticsearch.client.node.NodeClient;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.action.RestActions;
@@ -34,6 +35,8 @@ import org.elasticsearch.rest.action.RestToXContentListener;
 
 import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorPlugin;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.settings.EnabledSetting;
 import com.amazon.opendistroforelasticsearch.ad.transport.GetAnomalyDetectorAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.GetAnomalyDetectorRequest;
@@ -61,7 +64,7 @@ public class RestGetAnomalyDetectorAction extends BaseRestHandler {
         }
         String detectorId = request.param(DETECTOR_ID);
         String typesStr = request.param(TYPE);
-        String entityValue = request.param(ENTITY);
+
         String rawPath = request.rawPath();
         boolean returnJob = request.paramAsBoolean("job", false);
         boolean returnTask = request.paramAsBoolean("task", false);
@@ -74,7 +77,7 @@ public class RestGetAnomalyDetectorAction extends BaseRestHandler {
             typesStr,
             rawPath,
             all,
-            entityValue
+            buildEntity(request, detectorId)
         );
 
         return channel -> client
@@ -97,7 +100,47 @@ public class RestGetAnomalyDetectorAction extends BaseRestHandler {
                 new Route(
                     RestRequest.Method.GET,
                     String.format(Locale.ROOT, "%s/{%s}/%s/{%s}", AnomalyDetectorPlugin.AD_BASE_DETECTORS_URI, DETECTOR_ID, PROFILE, TYPE)
+                ),
+                // Considering users may provide entity in the search body, support POST as well.
+                new Route(
+                    RestRequest.Method.POST,
+                    String.format(Locale.ROOT, "%s/{%s}/%s", AnomalyDetectorPlugin.AD_BASE_DETECTORS_URI, DETECTOR_ID, PROFILE)
+                ),
+                new Route(
+                    RestRequest.Method.POST,
+                    String.format(Locale.ROOT, "%s/{%s}/%s/{%s}", AnomalyDetectorPlugin.AD_BASE_DETECTORS_URI, DETECTOR_ID, PROFILE, TYPE)
                 )
             );
+    }
+
+    private Entity buildEntity(RestRequest request, String detectorId) throws IOException {
+        if (Strings.isEmpty(detectorId)) {
+            throw new IllegalStateException(CommonErrorMessages.AD_ID_MISSING_MSG);
+        }
+
+        String entityName = request.param(CommonName.CATEGORICAL_FIELD);
+        String entityValue = request.param(CommonName.ENTITY_KEY);
+
+        if (entityName != null && entityValue != null) {
+            // single-stream profile request:
+            // GET _opendistro/_anomaly_detection/detectors/<detectorId>/_profile/init_progress?category_field=<field-name>&entity=<value>
+            return Entity.createSingleAttributeEntity(detectorId, entityName, entityValue);
+        } else if (request.hasContent()) {
+            /* HCAD profile request:
+             * GET _opendistro/_anomaly_detection/detectors/<detectorId>/_profile/init_progress
+             * {
+             *     "entity": [{
+                      "name": "clientip",
+                      "value": "13.24.0.0"
+                   }]
+             * }
+             */
+            Optional<Entity> entity = Entity.fromJsonObject(request.contentParser());
+            if (entity.isPresent()) {
+                return entity.get();
+            }
+        }
+        // not a valid profile request with correct entity information
+        return null;
     }
 }

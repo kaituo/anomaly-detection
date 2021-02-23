@@ -18,7 +18,6 @@ package com.amazon.opendistroforelasticsearch.ad;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -101,7 +100,7 @@ public final class AnomalyDetectorRunner {
                             ActionListener.wrap(features -> {
                                 List<ThresholdingResult> entityResults = modelManager.getPreviewResults(features.getProcessedFeatures());
                                 List<AnomalyResult> sampledEntityResults = sample(
-                                    parsePreviewResult(detector, features, entityResults, Arrays.asList(entity)),
+                                    parsePreviewResult(detector, features, entityResults, entity),
                                     maxPreviewResults
                                 );
                                 multiEntitiesResponseListener.onResponse(new EntityAnomalyResult(sampledEntityResults));
@@ -133,7 +132,7 @@ public final class AnomalyDetectorRunner {
         AnomalyDetector detector,
         Features features,
         List<ThresholdingResult> results,
-        List<Entity> entity
+        Entity entity
     ) {
         // unprocessedFeatures[][], each row is for one date range.
         // For example, unprocessedFeatures[0][2] is for the first time range, the third feature

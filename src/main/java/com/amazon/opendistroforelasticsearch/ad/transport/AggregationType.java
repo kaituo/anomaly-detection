@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -13,15 +13,8 @@
  * permissions and limitations under the License.
  */
 
-package com.amazon.opendistroforelasticsearch.ad;
+package com.amazon.opendistroforelasticsearch.ad.transport;
 
-public interface EntityModelSize {
-    /**
-     * Gets an entity's model sizes
-     *
-     * @param detectorId Detector Id
-     * @param entityModelId Entity's model Id
-     * @return the entity's memory size
-     */
-    long getModelSize(String detectorId, String entityModelId);
+public enum AggregationType {
+    AVG;
 }

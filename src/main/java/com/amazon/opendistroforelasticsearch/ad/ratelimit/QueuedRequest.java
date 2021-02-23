@@ -17,14 +17,15 @@ package com.amazon.opendistroforelasticsearch.ad.ratelimit;
 
 public abstract class QueuedRequest {
     protected long expirationEpochMs;
-    private String detectorId;
-    private SegmentPriority priority;
+    protected String detectorId;
+    protected SegmentPriority priority;
 
     /**
      *
      * @param expirationEpochMs Request expiry time in milliseconds
      * @param detectorId A queue consists of various segments with different priority.
      *  A queued request belongs one segment.
+     * @param priority how urgent the request is
      */
     protected QueuedRequest(long expirationEpochMs, String detectorId, SegmentPriority priority) {
         this.expirationEpochMs = expirationEpochMs;

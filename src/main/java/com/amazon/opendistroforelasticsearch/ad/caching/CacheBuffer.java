@@ -32,7 +32,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import com.amazon.opendistroforelasticsearch.ad.ExpiringState;
-import com.amazon.opendistroforelasticsearch.ad.MaintenanceState;
 import com.amazon.opendistroforelasticsearch.ad.MemoryTracker;
 import com.amazon.opendistroforelasticsearch.ad.MemoryTracker.Origin;
 import com.amazon.opendistroforelasticsearch.ad.ml.EntityModel;
@@ -59,13 +58,14 @@ import com.amazon.opendistroforelasticsearch.ad.ratelimit.SegmentPriority;
  * top minimumCapacity active entities (last X entities in priorityList) as in dedicated
  * cache and all others in shared cache.
  */
-public class CacheBuffer implements ExpiringState, MaintenanceState {
+public class CacheBuffer implements ExpiringState {
     private static final Logger LOG = LogManager.getLogger(CacheBuffer.class);
 
     // max entities to track per detector
     private final int MAX_TRACKING_ENTITIES = 1000000;
 
-    private final int minimumCapacity;
+    private int minimumCapacity;
+
     // key -> value
     private final ConcurrentHashMap<String, ModelState<EntityModel>> items;
     // memory consumption per entity
@@ -74,7 +74,7 @@ public class CacheBuffer implements ExpiringState, MaintenanceState {
     private final Duration modelTtl;
     private final String detectorId;
     private Instant lastUsedTime;
-    private final long reservedBytes;
+    private long reservedBytes;
     private final PriorityTracker priorityTracker;
     private final Clock clock;
     private final CheckpointWriteQueue checkpointWriteQueue;
@@ -91,21 +91,16 @@ public class CacheBuffer implements ExpiringState, MaintenanceState {
         CheckpointWriteQueue checkpointWriteQueue,
         Random random
     ) {
-        if (minimumCapacity <= 0) {
-            throw new IllegalArgumentException("minimum capacity should be larger than 0");
-        }
-        this.minimumCapacity = minimumCapacity;
+        this.memoryConsumptionPerEntity = memoryConsumptionPerEntity;
+        setMinimumCapacity(minimumCapacity);
 
         this.items = new ConcurrentHashMap<>();
-
-        this.memoryConsumptionPerEntity = memoryConsumptionPerEntity;
         this.memoryTracker = memoryTracker;
 
         this.modelTtl = modelTtl;
         this.detectorId = detectorId;
         this.lastUsedTime = clock.instant();
 
-        this.reservedBytes = memoryConsumptionPerEntity * minimumCapacity;
         this.clock = clock;
         this.priorityTracker = new PriorityTracker(clock, intervalSecs, clock.instant().getEpochSecond(), MAX_TRACKING_ENTITIES);
         this.checkpointWriteQueue = checkpointWriteQueue;
@@ -162,7 +157,7 @@ public class CacheBuffer implements ExpiringState, MaintenanceState {
             // Since we have already considered them while allocating CacheBuffer,
             // skip bookkeeping.
             if (!sharedCacheEmpty()) {
-                memoryTracker.consumeMemory(memoryConsumptionPerEntity, false, Origin.MULTI_ENTITY_DETECTOR);
+                memoryTracker.consumeMemory(memoryConsumptionPerEntity, false, Origin.HC_DETECTOR);
             }
         } else {
             update(entityModelId);
@@ -236,9 +231,12 @@ public class CacheBuffer implements ExpiringState, MaintenanceState {
         ModelState<EntityModel> valueRemoved = items.remove(keyToRemove);
 
         if (valueRemoved != null) {
-            // if we releasing a shared cache item, release memory as well.
-            if (!reserved) {
-                memoryTracker.releaseMemory(memoryConsumptionPerEntity, false, Origin.MULTI_ENTITY_DETECTOR);
+            if (reserved) {
+                // release in reserved memory
+                memoryTracker.releaseMemory(memoryConsumptionPerEntity, true, Origin.HC_DETECTOR);
+            } else {
+                // release in shared memory
+                memoryTracker.releaseMemory(memoryConsumptionPerEntity, false, Origin.HC_DETECTOR);
             }
 
             EntityModel modelRemoved = valueRemoved.getModel();
@@ -309,9 +307,13 @@ public class CacheBuffer implements ExpiringState, MaintenanceState {
         return replaced;
     }
 
-    @Override
-    public void maintenance() {
+    /**
+     * Remove expired state and save checkpoints of existing states
+     * @return removed states
+     */
+    public List<ModelState<EntityModel>> maintenance() {
         List<ModelState<EntityModel>> modelsToSave = new ArrayList<>();
+        List<ModelState<EntityModel>> removedStates = new ArrayList<>();
         items.entrySet().stream().forEach(entry -> {
             String entityModelId = entry.getKey();
             try {
@@ -328,7 +330,7 @@ public class CacheBuffer implements ExpiringState, MaintenanceState {
                     // put: not a problem as we are unlikely to maintain an entry that's not
                     // already in the cache
                     // remove method saves checkpoint as well
-                    remove(entityModelId);
+                    removedStates.add(remove(entityModelId));
                 } else if (random.nextInt(6) == 0) {
                     // checkpoint is relatively big compared to other queued requests
                     // save checkpoints with 1/6 probability as we expect to save
@@ -342,6 +344,7 @@ public class CacheBuffer implements ExpiringState, MaintenanceState {
         });
 
         checkpointWriteQueue.writeAll(modelsToSave, detectorId, false, SegmentPriority.MEDIUM);
+        return removedStates;
     }
 
     /**
@@ -391,9 +394,9 @@ public class CacheBuffer implements ExpiringState, MaintenanceState {
         // not a problem as we are releasing memory in MemoryTracker.
         // The newly added one loses references and soon GC will collect it.
         // We have memory tracking correction to fix incorrect memory usage record.
-        memoryTracker.releaseMemory(getReservedBytes(), true, Origin.MULTI_ENTITY_DETECTOR);
+        memoryTracker.releaseMemory(getReservedBytes(), true, Origin.HC_DETECTOR);
         if (!sharedCacheEmpty()) {
-            memoryTracker.releaseMemory(getBytesInSharedCache(), false, Origin.MULTI_ENTITY_DETECTOR);
+            memoryTracker.releaseMemory(getBytesInSharedCache(), false, Origin.HC_DETECTOR);
         }
         items.clear();
         priorityTracker.clearPriority();
@@ -452,11 +455,19 @@ public class CacheBuffer implements ExpiringState, MaintenanceState {
         return detectorId;
     }
 
-    public List<ModelState<?>> getAllModels() {
+    public List<ModelState<EntityModel>> getAllModels() {
         return items.values().stream().collect(Collectors.toList());
     }
 
     public PriorityTracker getPriorityTracker() {
         return priorityTracker;
+    }
+
+    public void setMinimumCapacity(int minimumCapacity) {
+        if (minimumCapacity < 0) {
+            throw new IllegalArgumentException("minimum capacity should be larger than or equals 0");
+        }
+        this.minimumCapacity = minimumCapacity;
+        this.reservedBytes = memoryConsumptionPerEntity * minimumCapacity;
     }
 }

@@ -62,6 +62,7 @@ public class RolloverTests extends AbstractADTest {
     private ClusterState clusterState;
     private ClusterService clusterService;
     private long defaultMaxDocs;
+    private int numberOfNodes;
 
     @Override
     public void setUp() throws Exception {
@@ -77,7 +78,7 @@ public class RolloverTests extends AbstractADTest {
                     new HashSet<>(
                         Arrays
                             .asList(
-                                AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS,
+                                AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS_PER_SHARD,
                                 AnomalyDetectorSettings.AD_RESULT_HISTORY_ROLLOVER_PERIOD,
                                 AnomalyDetectorSettings.AD_RESULT_HISTORY_RETENTION_PERIOD,
                                 AnomalyDetectorSettings.MAX_PRIMARY_SHARDS
@@ -96,6 +97,8 @@ public class RolloverTests extends AbstractADTest {
         when(adminClient.indices()).thenReturn(indicesClient);
 
         DiscoveryNodeFilterer nodeFilter = mock(DiscoveryNodeFilterer.class);
+        numberOfNodes = 2;
+        when(nodeFilter.getNumberOfEligibleDataNodes()).thenReturn(numberOfNodes);
 
         adIndices = new AnomalyDetectionIndices(client, clusterService, threadPool, settings, nodeFilter);
 
@@ -111,7 +114,7 @@ public class RolloverTests extends AbstractADTest {
             return null;
         }).when(clusterAdminClient).state(any(), any());
 
-        defaultMaxDocs = AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS.getDefault(Settings.EMPTY);
+        defaultMaxDocs = AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS_PER_SHARD.getDefault(Settings.EMPTY);
     }
 
     private void assertRolloverRequest(RolloverRequest request) {
@@ -119,7 +122,7 @@ public class RolloverTests extends AbstractADTest {
 
         Map<String, Condition<?>> conditions = request.getConditions();
         assertEquals(1, conditions.size());
-        assertEquals(new MaxDocsCondition(defaultMaxDocs), conditions.get(MaxDocsCondition.NAME));
+        assertEquals(new MaxDocsCondition(defaultMaxDocs * numberOfNodes), conditions.get(MaxDocsCondition.NAME));
 
         CreateIndexRequest createIndexRequest = request.getCreateIndexRequest();
         assertEquals(AnomalyDetectionIndices.AD_RESULT_HISTORY_INDEX_PATTERN, createIndexRequest.index());
@@ -159,7 +162,7 @@ public class RolloverTests extends AbstractADTest {
 
             Map<String, Condition<?>> conditions = request.getConditions();
             assertEquals(1, conditions.size());
-            assertEquals(new MaxDocsCondition(defaultMaxDocs), conditions.get(MaxDocsCondition.NAME));
+            assertEquals(new MaxDocsCondition(defaultMaxDocs * numberOfNodes), conditions.get(MaxDocsCondition.NAME));
 
             CreateIndexRequest createIndexRequest = request.getCreateIndexRequest();
             assertEquals(AnomalyDetectionIndices.AD_RESULT_HISTORY_INDEX_PATTERN, createIndexRequest.index());
@@ -198,7 +201,7 @@ public class RolloverTests extends AbstractADTest {
 
             Map<String, Condition<?>> conditions = request.getConditions();
             assertEquals(1, conditions.size());
-            assertEquals(new MaxDocsCondition(defaultMaxDocs), conditions.get(MaxDocsCondition.NAME));
+            assertEquals(new MaxDocsCondition(defaultMaxDocs * numberOfNodes), conditions.get(MaxDocsCondition.NAME));
 
             CreateIndexRequest createIndexRequest = request.getCreateIndexRequest();
             assertEquals(AnomalyDetectionIndices.AD_RESULT_HISTORY_INDEX_PATTERN, createIndexRequest.index());

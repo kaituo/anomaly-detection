@@ -108,6 +108,7 @@ public class MemoryTrackerTests extends ESTestCase {
         when(detector.getShingleSize()).thenReturn(1);
 
         circuitBreaker = mock(ADCircuitBreakerService.class);
+        when(circuitBreaker.isOpen()).thenReturn(false);
     }
 
     private void setUpBigHeap() {
@@ -152,10 +153,10 @@ public class MemoryTrackerTests extends ESTestCase {
         assertTrue(!tracker.canAllocate((long) (largeHeapSize * modelMaxPercen + 10)));
 
         long bytesToUse = 100_000;
-        tracker.consumeMemory(bytesToUse, false, MemoryTracker.Origin.MULTI_ENTITY_DETECTOR);
+        tracker.consumeMemory(bytesToUse, false, MemoryTracker.Origin.HC_DETECTOR);
         assertTrue(!tracker.canAllocate((long) (largeHeapSize * modelMaxPercen)));
 
-        tracker.releaseMemory(bytesToUse, false, MemoryTracker.Origin.MULTI_ENTITY_DETECTOR);
+        tracker.releaseMemory(bytesToUse, false, MemoryTracker.Origin.HC_DETECTOR);
         assertTrue(tracker.canAllocate((long) (largeHeapSize * modelMaxPercen)));
     }
 
@@ -169,11 +170,11 @@ public class MemoryTrackerTests extends ESTestCase {
         long bytesToUse = 100_000;
         assertEquals(bytesToUse, tracker.getHeapLimit());
         assertEquals((long) (smallHeapSize * modelDesiredSizePercentage), tracker.getDesiredModelSize());
-        tracker.consumeMemory(bytesToUse, false, MemoryTracker.Origin.MULTI_ENTITY_DETECTOR);
-        tracker.consumeMemory(bytesToUse, true, MemoryTracker.Origin.MULTI_ENTITY_DETECTOR);
+        tracker.consumeMemory(bytesToUse, false, MemoryTracker.Origin.HC_DETECTOR);
+        tracker.consumeMemory(bytesToUse, true, MemoryTracker.Origin.HC_DETECTOR);
         assertEquals(2 * bytesToUse, tracker.getTotalMemoryBytes());
 
         assertEquals(bytesToUse, tracker.memoryToShed());
-        assertTrue(!tracker.syncMemoryState(MemoryTracker.Origin.MULTI_ENTITY_DETECTOR, 2 * bytesToUse, bytesToUse));
+        assertTrue(!tracker.syncMemoryState(MemoryTracker.Origin.HC_DETECTOR, 2 * bytesToUse, bytesToUse));
     }
 }

@@ -16,6 +16,8 @@
 package com.amazon.opendistroforelasticsearch.ad.transport;
 
 import static com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages.INVALID_SEARCH_QUERY_MSG;
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.MAX_ENTITIES_PER_INTERVAL;
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.PAGE_SIZE;
 
 import java.net.ConnectException;
 import java.util.ArrayList;
@@ -58,6 +60,7 @@ import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.node.NodeClosedException;
 import org.elasticsearch.rest.RestStatus;
@@ -82,14 +85,16 @@ import com.amazon.opendistroforelasticsearch.ad.common.exception.LimitExceededEx
 import com.amazon.opendistroforelasticsearch.ad.common.exception.ResourceNotFoundException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
+import com.amazon.opendistroforelasticsearch.ad.feature.CompositeRetriever;
+import com.amazon.opendistroforelasticsearch.ad.feature.CompositeRetriever.Page;
 import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
-import com.amazon.opendistroforelasticsearch.ad.feature.SearchFeatureDao;
 import com.amazon.opendistroforelasticsearch.ad.feature.SinglePointFeatures;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelPartitioner;
 import com.amazon.opendistroforelasticsearch.ad.ml.RcfResult;
 import com.amazon.opendistroforelasticsearch.ad.ml.rcf.CombinedRcfResult;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.model.FeatureData;
 import com.amazon.opendistroforelasticsearch.ad.model.IntervalTimeConfiguration;
 import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
@@ -114,9 +119,6 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
 
     static final String TROUBLE_QUERYING_ERR_MSG = "Having trouble querying data: ";
     static final String NO_ACK_ERR = "no acknowledgements from model hosting nodes.";
-    // We need this invalid query tag to show proper error message on frontend
-    // refer to AD Kibana code: https://github.com/opendistro-for-elasticsearch/ \
-    // anomaly-detection-kibana-plugin/blob/master/public/pages/DetectorDetail/utils/constants.ts#L70-L76
 
     private final TransportService transportService;
     private final NodeStateManager stateManager;
@@ -131,10 +133,17 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
     private final ADCircuitBreakerService adCircuitBreakerService;
     private final ThreadPool threadPool;
     private final Client client;
-    private final SearchFeatureDao searchFeatureDao;
 
     // cache HC detector id
     private final Set<String> hcDetectors;
+    private NamedXContentRegistry xContentRegistry;
+    private Settings settings;
+    // within an interval, how many percents are used to process requests.
+    // 1.0 means we use all of the detection interval to process requests.
+    // to ensure we don't block next interval, it is better to set it less than 1.0.
+    private final float intervalRatioForRequest;
+    private int maxEntitiesPerInterval;
+    private int pageSize;
 
     @Inject
     public AnomalyResultTransportAction(
@@ -152,10 +161,11 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
         ADCircuitBreakerService adCircuitBreakerService,
         ADStats adStats,
         ThreadPool threadPool,
-        SearchFeatureDao searchFeatureDao
+        NamedXContentRegistry xContentRegistry
     ) {
         super(AnomalyResultAction.NAME, transportService, actionFilters, AnomalyResultRequest::new);
         this.transportService = transportService;
+        this.settings = settings;
         this.client = client;
         this.stateManager = manager;
         this.featureManager = featureManager;
@@ -172,8 +182,15 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
         this.adCircuitBreakerService = adCircuitBreakerService;
         this.adStats = adStats;
         this.threadPool = threadPool;
-        this.searchFeatureDao = searchFeatureDao;
         this.hcDetectors = new HashSet<>();
+        this.xContentRegistry = xContentRegistry;
+        this.intervalRatioForRequest = AnomalyDetectorSettings.INTERVAL_RATIO_FOR_REQUESTS;
+
+        this.maxEntitiesPerInterval = MAX_ENTITIES_PER_INTERVAL.get(settings);
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(MAX_ENTITIES_PER_INTERVAL, it -> maxEntitiesPerInterval = it);
+
+        this.pageSize = PAGE_SIZE.get(settings);
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(PAGE_SIZE, it -> pageSize = it);
     }
 
     /**
@@ -296,105 +313,125 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
 
             List<String> categoryField = anomalyDetector.getCategoryField();
             if (categoryField != null) {
-                Optional<AnomalyDetectionException> previousException = stateManager.fetchColdStartException(adID);
+                Optional<AnomalyDetectionException> previousException = stateManager.fetchExceptionAndClear(adID);
 
                 if (previousException.isPresent()) {
                     Exception exception = previousException.get();
                     LOG.error("Previous exception of {}: {}", adID, exception);
                     if (exception instanceof EndRunException) {
-                        listener.onFailure(exception);
                         EndRunException endRunException = (EndRunException) exception;
                         if (endRunException.isEndNow()) {
+                            listener.onFailure(exception);
                             return;
                         }
                     }
                 }
 
-                ActionListener<Map<String, double[]>> getEntityFeatureslistener = ActionListener.wrap(entityFeatures -> {
-                    if (entityFeatures.isEmpty()) {
-                        // Feature not available is common when we have data holes. Respond empty response
-                        // so that alerting will not print stack trace to avoid bloating our logs.
-                        LOG.info("No data in current detection window between {} and {} for {}", dataStartTime, dataEndTime, adID);
-                        listener
-                            .onResponse(
-                                new AnomalyResultResponse(
-                                    Double.NaN,
-                                    Double.NaN,
-                                    Double.NaN,
-                                    new ArrayList<FeatureData>(),
-                                    "No data in current detection window"
-                                )
-                            );
-                    } else {
-                        Set<Entry<DiscoveryNode, Map<String, double[]>>> node2Entities = entityFeatures
-                            .entrySet()
-                            .stream()
-                            .collect(
-                                Collectors
-                                    .groupingBy(
-                                        // from entity name to its node
-                                        e -> hashRing.getOwningNode(e.getKey()).get(),
-                                        Collectors.toMap(Entry::getKey, Entry::getValue)
-                                    )
-                            )
-                            .entrySet();
+                ActionListener<CompositeRetriever.Page> getEntityFeatureslistener =
+                    // didn't use ActionListener.wrap so that I can use this to refer to the listener inside the listener
+                    new ActionListener<CompositeRetriever.Page>() {
+                        @Override
+                        public void onResponse(CompositeRetriever.Page entityFeatures) {
+                            if (entityFeatures != null && false == entityFeatures.isEmpty()) {
+                                // wrap expensive operation inside ad threadpool
+                                threadPool.executor(AnomalyDetectorPlugin.AD_THREAD_POOL_NAME).execute(() -> {
+                                    Set<Entry<DiscoveryNode, Map<Entity, double[]>>> node2Entities = entityFeatures
+                                        .getResults()
+                                        .entrySet()
+                                        .stream()
+                                        .collect(
+                                            Collectors
+                                                .groupingBy(
+                                                    // from entity name to its node
+                                                    e -> hashRing.getOwningNode(e.getKey().toString()).get(),
+                                                    Collectors.toMap(Entry::getKey, Entry::getValue)
+                                                )
+                                        )
+                                        .entrySet();
 
-                        Iterator<Entry<DiscoveryNode, Map<String, double[]>>> iterator = node2Entities.iterator();
+                                    Iterator<Entry<DiscoveryNode, Map<Entity, double[]>>> iterator = node2Entities.iterator();
 
-                        while (iterator.hasNext()) {
-                            Entry<DiscoveryNode, Map<String, double[]>> entry = iterator.next();
-                            DiscoveryNode modelNode = entry.getKey();
-                            if (modelNode == null) {
-                                iterator.remove();
-                                continue;
-                            }
-                            String modelNodeId = modelNode.getId();
-                            if (stateManager.isMuted(modelNodeId)) {
-                                LOG.info(String.format(Locale.ROOT, NODE_UNRESPONSIVE_ERR_MSG + " %s", modelNodeId));
-                                iterator.remove();
+                                    while (iterator.hasNext()) {
+                                        Entry<DiscoveryNode, Map<Entity, double[]>> entry = iterator.next();
+                                        DiscoveryNode modelNode = entry.getKey();
+                                        if (modelNode == null) {
+                                            iterator.remove();
+                                            continue;
+                                        }
+                                        String modelNodeId = modelNode.getId();
+                                        if (stateManager.isMuted(modelNodeId)) {
+                                            LOG.info(String.format(Locale.ROOT, NODE_UNRESPONSIVE_ERR_MSG + " %s", modelNodeId));
+                                            iterator.remove();
+                                        }
+                                    }
+
+                                    final AtomicReference<AnomalyDetectionException> failure = new AtomicReference<>();
+                                    int nodeCount = node2Entities.size();
+                                    AtomicInteger responseCount = new AtomicInteger();
+                                    node2Entities.stream().forEach(nodeEntity -> {
+                                        DiscoveryNode node = nodeEntity.getKey();
+                                        transportService
+                                            .sendRequest(
+                                                node,
+                                                EntityResultAction.NAME,
+                                                new EntityResultRequest(adID, nodeEntity.getValue(), dataStartTime, dataEndTime),
+                                                option,
+                                                new ActionListenerResponseHandler<>(
+                                                    new EntityResultListener(
+                                                        node.getId(),
+                                                        adID,
+                                                        failure,
+                                                        nodeCount,
+                                                        entityFeatures,
+                                                        this,
+                                                        responseCount
+                                                    ),
+                                                    AcknowledgedResponse::new,
+                                                    ThreadPool.Names.SAME
+                                                )
+                                            );
+                                    });
+                                });
                             }
                         }
 
-                        int nodeCount = node2Entities.size();
-                        AtomicInteger responseCount = new AtomicInteger();
+                        @Override
+                        public void onFailure(Exception e) {
+                            Exception convertedException = convertedQueryFailureException(e, adID);
+                            if (false == (convertedException instanceof AnomalyDetectionException)) {
+                                Throwable cause = ExceptionsHelper.unwrapCause(convertedException);
+                                convertedException = new InternalFailure(adID, cause);
+                            }
+                            stateManager.setException(adID, convertedException);
+                        }
+                    };
 
-                        final AtomicReference<AnomalyDetectionException> failure = new AtomicReference<>();
-                        node2Entities.stream().forEach(nodeEntity -> {
-                            DiscoveryNode node = nodeEntity.getKey();
-                            transportService
-                                .sendRequest(
-                                    node,
-                                    EntityResultAction.NAME,
-                                    new EntityResultRequest(adID, nodeEntity.getValue(), dataStartTime, dataEndTime),
-                                    this.option,
-                                    new ActionListenerResponseHandler<>(
-                                        new EntityResultListener(node.getId(), adID, responseCount, nodeCount, failure, listener),
-                                        AcknowledgedResponse::new,
-                                        ThreadPool.Names.SAME
-                                    )
-                                );
-                        });
-                    }
+                // assume request are in epoch milliseconds
+                long nextDetectionStartTime = request.getEnd() + (long) (anomalyDetector.getDetectorIntervalInMilliseconds()
+                    * intervalRatioForRequest);
 
-                }, exception -> handleFailure(exception, listener, adID));
+                CompositeRetriever compositeRetriever = new CompositeRetriever(
+                    dataStartTime,
+                    dataEndTime,
+                    anomalyDetector,
+                    xContentRegistry,
+                    client,
+                    nextDetectionStartTime,
+                    settings,
+                    maxEntitiesPerInterval,
+                    pageSize
+                );
 
-                threadPool
-                    .executor(AnomalyDetectorPlugin.AD_THREAD_POOL_NAME)
-                    .execute(
-                        () -> searchFeatureDao
-                            .getFeaturesByEntities(
-                                anomalyDetector,
-                                dataStartTime,
-                                dataEndTime,
-                                new ThreadedActionListener<>(
-                                    LOG,
-                                    threadPool,
-                                    AnomalyDetectorPlugin.AD_THREAD_POOL_NAME,
-                                    getEntityFeatureslistener,
-                                    false
-                                )
-                            )
-                    );
+                compositeRetriever.start(getEntityFeatureslistener);
+
+                // We don't know when the pagination will not finish. To not
+                // block the following interval request to start, we return immediately.
+                // Pagination will stop itself when the time is up.
+                if (previousException.isPresent()) {
+                    listener.onFailure(previousException.get());
+                } else {
+                    listener.onResponse(new AnomalyResultResponse(Double.NaN, Double.NaN, Double.NaN, new ArrayList<FeatureData>()));
+                }
                 return;
             }
 
@@ -526,18 +563,41 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                         new ActionListenerResponseHandler<>(rcfListener, RCFResultResponse::new)
                     );
             }
-        }, exception -> { handleFailure(exception, listener, adID); });
+        }, exception -> { handleQueryFailure(exception, listener, adID); });
     }
 
-    private void handleFailure(Exception exception, ActionListener<AnomalyResultResponse> listener, String adID) {
-        if (exception instanceof IndexNotFoundException) {
-            listener.onFailure(new EndRunException(adID, TROUBLE_QUERYING_ERR_MSG + exception.getMessage(), true).countedInStats(false));
-        } else if (exception instanceof EndRunException) {
+    private void handleQueryFailure(Exception exception, ActionListener<AnomalyResultResponse> listener, String adID) {
+        Exception convertedQueryFailureException = convertedQueryFailureException(exception, adID);
+
+        if (convertedQueryFailureException instanceof EndRunException) {
             // invalid feature query
-            listener.onFailure(exception);
+            listener.onFailure(convertedQueryFailureException);
         } else {
-            handleExecuteException(exception, listener, adID);
+            handleExecuteException(convertedQueryFailureException, listener, adID);
         }
+    }
+
+    /**
+     * Convert a query related exception to EndRunException
+     * @param exception Exception
+     * @param adID detector Id
+     * @return the converted exception if the exception is query related
+     */
+    private Exception convertedQueryFailureException(Exception exception, String adID) {
+        if (ExceptionUtil.isIndexNotAvailable(exception)) {
+            return new EndRunException(adID, TROUBLE_QUERYING_ERR_MSG + exception.getMessage(), true).countedInStats(false);
+        } else if (exception instanceof SearchPhaseExecutionException && invalidQuery((SearchPhaseExecutionException) exception)) {
+            // This is to catch invalid aggregation on wrong field type. For example,
+            // sum aggregation on text field. We should end detector run for such case.
+            return new EndRunException(
+                adID,
+                INVALID_SEARCH_QUERY_MSG + ((SearchPhaseExecutionException) exception).getDetailedMessage(),
+                exception,
+                true
+            ).countedInStats(false);
+        }
+
+        return exception;
     }
 
     /**
@@ -577,7 +637,7 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
 
         // fetch previous cold start exception
         String adID = detector.getDetectorId();
-        final Optional<AnomalyDetectionException> previousException = stateManager.fetchColdStartException(adID);
+        final Optional<AnomalyDetectionException> previousException = stateManager.fetchExceptionAndClear(adID);
         if (previousException.isPresent()) {
             Exception exception = previousException.get();
             LOG.error("Previous exception of {}: {}", () -> adID, () -> exception);
@@ -628,18 +688,6 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
             listener.onFailure(ex);
         } else if (ex instanceof AnomalyDetectionException) {
             listener.onFailure(new InternalFailure((AnomalyDetectionException) ex));
-        } else if (ex instanceof SearchPhaseExecutionException && invalidQuery((SearchPhaseExecutionException) ex)) {
-            // This is to catch invalid aggregation on wrong field type. For example,
-            // sum aggregation on text field. We should end detector run for such case.
-            listener
-                .onFailure(
-                    new EndRunException(
-                        adID,
-                        INVALID_SEARCH_QUERY_MSG + ((SearchPhaseExecutionException) ex).getDetailedMessage(),
-                        ex,
-                        true
-                    ).countedInStats(false)
-                );
         } else {
             Throwable cause = ExceptionsHelper.unwrapCause(ex);
             listener.onFailure(new InternalFailure(adID, cause));
@@ -980,26 +1028,20 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                     .wrap(res -> { LOG.info("Succeeded in training {}", detectorId); }, exception -> {
                         if (exception instanceof AnomalyDetectionException) {
                             // e.g., partitioned model exceeds memory limit
-                            stateManager.setLastColdStartException(detectorId, (AnomalyDetectionException) exception);
+                            stateManager.setException(detectorId, exception);
                         } else if (exception instanceof IllegalArgumentException) {
                             // IllegalArgumentException due to invalid training data
                             stateManager
-                                .setLastColdStartException(
-                                    detectorId,
-                                    new EndRunException(detectorId, "Invalid training data", exception, false)
-                                );
+                                .setException(detectorId, new EndRunException(detectorId, "Invalid training data", exception, false));
                         } else if (exception instanceof ElasticsearchTimeoutException) {
                             stateManager
-                                .setLastColdStartException(
+                                .setException(
                                     detectorId,
                                     new InternalFailure(detectorId, "Time out while indexing cold start checkpoint", exception)
                                 );
                         } else {
                             stateManager
-                                .setLastColdStartException(
-                                    detectorId,
-                                    new EndRunException(detectorId, "Error while training model", exception, false)
-                                );
+                                .setException(detectorId, new EndRunException(detectorId, "Error while training model", exception, false));
                         }
                     });
 
@@ -1010,21 +1052,16 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
                         new ThreadedActionListener<>(LOG, threadPool, AnomalyDetectorPlugin.AD_THREAD_POOL_NAME, trainModelListener, false)
                     );
             } else {
-                stateManager.setLastColdStartException(detectorId, new EndRunException(detectorId, "Cannot get training data", false));
+                stateManager.setException(detectorId, new EndRunException(detectorId, "Cannot get training data", false));
             }
         }, exception -> {
             if (exception instanceof ElasticsearchTimeoutException) {
-                stateManager
-                    .setLastColdStartException(
-                        detectorId,
-                        new InternalFailure(detectorId, "Time out while getting training data", exception)
-                    );
+                stateManager.setException(detectorId, new InternalFailure(detectorId, "Time out while getting training data", exception));
             } else if (exception instanceof AnomalyDetectionException) {
                 // e.g., Invalid search query
-                stateManager.setLastColdStartException(detectorId, (AnomalyDetectionException) exception);
+                stateManager.setException(detectorId, exception);
             } else {
-                stateManager
-                    .setLastColdStartException(detectorId, new EndRunException(detectorId, "Error while cold start", exception, false));
+                stateManager.setException(detectorId, new EndRunException(detectorId, "Error while cold start", exception, false));
             }
         });
 
@@ -1057,7 +1094,7 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
     private Optional<AnomalyDetectionException> coldStartIfNoCheckPoint(AnomalyDetector detector) {
         String detectorId = detector.getDetectorId();
 
-        Optional<AnomalyDetectionException> previousException = stateManager.fetchColdStartException(detectorId);
+        Optional<AnomalyDetectionException> previousException = stateManager.fetchExceptionAndClear(detectorId);
 
         if (previousException.isPresent()) {
             Exception exception = previousException.get();
@@ -1080,7 +1117,7 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
             } else {
                 String errorMsg = String.format(Locale.ROOT, "Fail to get checkpoint state for %s", detectorId);
                 LOG.error(errorMsg, exception);
-                stateManager.setLastColdStartException(detectorId, new AnomalyDetectionException(errorMsg, exception));
+                stateManager.setException(detectorId, new AnomalyDetectionException(errorMsg, exception));
             }
         }));
 
@@ -1090,44 +1127,44 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
     class EntityResultListener implements ActionListener<AcknowledgedResponse> {
         private String nodeId;
         private final String adID;
-        private AtomicInteger responseCount;
-        private int nodeCount;
-        private ActionListener<AnomalyResultResponse> listener;
-        private List<AcknowledgedResponse> ackResponses;
         private AtomicReference<AnomalyDetectionException> failure;
+        private int nodeCount;
+        private AtomicInteger responseCount;
+        private Page page;
+        private ActionListener<CompositeRetriever.Page> pageListener;
 
         EntityResultListener(
             String nodeId,
             String adID,
-            AtomicInteger responseCount,
-            int nodeCount,
             AtomicReference<AnomalyDetectionException> failure,
-            ActionListener<AnomalyResultResponse> listener
+            int nodeCount,
+            Page page,
+            ActionListener<CompositeRetriever.Page> pageListener,
+            AtomicInteger responseCount
         ) {
             this.nodeId = nodeId;
             this.adID = adID;
-            this.responseCount = responseCount;
-            this.nodeCount = nodeCount;
             this.failure = failure;
-            this.listener = listener;
-            this.ackResponses = new ArrayList<>();
+            this.nodeCount = nodeCount;
+            this.page = page;
+            this.pageListener = pageListener;
+            this.responseCount = responseCount;
         }
 
         @Override
         public void onResponse(AcknowledgedResponse response) {
             try {
-                stateManager.resetBackpressureCounter(nodeId);
                 if (response.isAcknowledged() == false) {
                     LOG.error("Cannot send entities' features to {} for {}", nodeId, adID);
                     stateManager.addPressure(nodeId);
                 } else {
-                    ackResponses.add(response);
+                    stateManager.resetBackpressureCounter(nodeId);
                 }
             } catch (Exception ex) {
                 LOG.error("Unexpected exception: {} for {}", ex, adID);
             } finally {
-                if (nodeCount == responseCount.incrementAndGet()) {
-                    handleEntityResponses();
+                if (nodeCount == responseCount.incrementAndGet() && page.hasTimeLeft()) {
+                    page.next(pageListener);
                 }
             }
         }
@@ -1135,27 +1172,21 @@ public class AnomalyResultTransportAction extends HandledTransportAction<ActionR
         @Override
         public void onFailure(Exception e) {
             try {
+                // e.g., we have connection issues with all of the nodes while restarting clusters
                 LOG.error(new ParameterizedMessage("Cannot send entities' features to {} for {}", nodeId, adID), e);
 
                 handlePredictionFailure(e, adID, nodeId, failure);
 
+                if (failure.get() != null) {
+                    stateManager.setException(adID, failure.get());
+                }
+
             } catch (Exception ex) {
                 LOG.error("Unexpected exception: {} for {}", ex, adID);
             } finally {
-                if (nodeCount == responseCount.incrementAndGet()) {
-                    handleEntityResponses();
+                if (nodeCount == responseCount.incrementAndGet() && page.hasTimeLeft()) {
+                    page.next(pageListener);
                 }
-            }
-        }
-
-        private void handleEntityResponses() {
-            if (failure.get() != null) {
-                listener.onFailure(failure.get());
-            } else if (ackResponses.isEmpty()) {
-                // e.g., we have connection issues with all of the nodes while restarting clusters
-                listener.onFailure(new InternalFailure(adID, NO_ACK_ERR));
-            } else {
-                listener.onResponse(new AnomalyResultResponse(0, 0, 0, new ArrayList<FeatureData>()));
             }
         }
     }

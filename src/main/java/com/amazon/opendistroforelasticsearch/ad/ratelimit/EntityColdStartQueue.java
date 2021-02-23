@@ -20,6 +20,8 @@ import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorS
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.Locale;
+import java.util.Optional;
 import java.util.Random;
 
 import org.apache.logging.log4j.LogManager;
@@ -30,6 +32,7 @@ import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.threadpool.ThreadPool;
 
+import com.amazon.opendistroforelasticsearch.ad.NodeStateManager;
 import com.amazon.opendistroforelasticsearch.ad.breaker.ADCircuitBreakerService;
 import com.amazon.opendistroforelasticsearch.ad.ml.EntityColdStarter;
 import com.amazon.opendistroforelasticsearch.ad.ml.EntityModel;
@@ -60,7 +63,8 @@ public class EntityColdStartQueue extends SingleRequestQueue<EntityRequest> {
         ClientUtil clientUtil,
         Duration executionTtl,
         EntityColdStarter entityColdStarter,
-        Duration stateTtl
+        Duration stateTtl,
+        NodeStateManager nodeStateManager
     ) {
         super(
             "cold-start",
@@ -80,7 +84,8 @@ public class EntityColdStartQueue extends SingleRequestQueue<EntityRequest> {
             clientUtil,
             COLD_ENTITY_QUEUE_CONCURRENCY,
             executionTtl,
-            stateTtl
+            stateTtl,
+            nodeStateManager
         );
         this.entityColdStarter = entityColdStarter;
     }
@@ -88,35 +93,34 @@ public class EntityColdStartQueue extends SingleRequestQueue<EntityRequest> {
     @Override
     protected void executeRequest(EntityRequest coldStartRequest, ActionListener<Void> listener) {
         String detectorId = coldStartRequest.getDetectorId();
-        String modelId = coldStartRequest.getModelId();
+
+        Optional<String> modelId = coldStartRequest.getModelId();
+
+        if (false == modelId.isPresent()) {
+            String error = String.format(Locale.ROOT, "Fail to get model id for request %s", coldStartRequest);
+            LOG.warn(error);
+            listener.onFailure(new RuntimeException(error));
+            return;
+        }
 
         ModelState<EntityModel> modelState = new ModelState<>(
-            new EntityModel(modelId, new ArrayDeque<>(), null, null),
-            modelId,
+            new EntityModel(coldStartRequest.getEntity(), new ArrayDeque<>(), null, null),
+            modelId.get(),
             detectorId,
             ModelType.ENTITY.getName(),
             clock,
             0
         );
 
-        EntityModel model = modelState.getModel();
+        ActionListener<Void> failureListener = ActionListener.delegateResponse(listener, (delegateListener, e) -> {
+            if (ExceptionUtil.isOverloaded(e)) {
+                LOG.error("ES is overloaded");
+                setCoolDownStart();
+            }
+            nodeStateManager.setException(detectorId, e);
+            delegateListener.onFailure(e);
+        });
 
-        if (model == null) {
-            model = new EntityModel(coldStartRequest.getModelId(), new ArrayDeque<>(), null, null);
-            modelState.setModel(model);
-        }
-
-        if (model.getRcf() == null || model.getThreshold() == null) {
-            // put models inside modelState if this is an active entity
-            ActionListener<Void> failureListener = ActionListener.delegateResponse(listener, (delegateListener, e) -> {
-                if (ExceptionUtil.isOverloaded(e)) {
-                    LOG.error("ES is overloaded");
-                    setCoolDownStart();
-                }
-                delegateListener.onFailure(e);
-            });
-
-            entityColdStarter.trainModel(coldStartRequest.getEntityName(), detectorId, modelState, failureListener);
-        }
+        entityColdStarter.trainModel(coldStartRequest.getEntity(), detectorId, modelState, failureListener);
     }
 }

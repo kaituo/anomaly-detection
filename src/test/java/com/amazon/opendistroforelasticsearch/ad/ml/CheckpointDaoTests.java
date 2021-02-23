@@ -70,6 +70,7 @@ import org.powermock.core.classloader.annotations.PrepareForTest;
 import org.powermock.modules.junit4.PowerMockRunner;
 
 import test.com.amazon.opendistroforelasticsearch.ad.util.MLUtil;
+import test.com.amazon.opendistroforelasticsearch.ad.util.RandomModelStateConfig;
 
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices;
@@ -414,7 +415,7 @@ public class CheckpointDaoTests {
     @SuppressWarnings("unchecked")
     @Test
     public void restore() throws IOException {
-        ModelState<EntityModel> state = MLUtil.randomNonEmptyModelState();
+        ModelState<EntityModel> state = MLUtil.randomModelState(new RandomModelStateConfig.Builder().fullModel(true).build());
         EntityModel modelToSave = state.getModel();
 
         checkpointDao = new CheckpointDao(

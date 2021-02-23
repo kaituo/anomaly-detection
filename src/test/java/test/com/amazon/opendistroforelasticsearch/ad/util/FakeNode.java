@@ -22,6 +22,7 @@ import static org.elasticsearch.test.ClusterServiceUtils.setState;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -40,6 +41,8 @@ import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.network.NetworkService;
+import org.elasticsearch.common.settings.ClusterSettings;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.BoundTransportAddress;
 import org.elasticsearch.common.transport.TransportAddress;
@@ -54,15 +57,21 @@ import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.transport.nio.MockNioTransport;
 
 public class FakeNode implements Releasable {
-    public FakeNode(String name, ThreadPool threadPool, Settings settings, TransportInterceptor transportInterceptor) {
+    public FakeNode(
+        String name,
+        ThreadPool threadPool,
+        final Settings nodeSettings,
+        final Set<Setting<?>> settingsSet,
+        TransportInterceptor transportInterceptor
+    ) {
         final Function<BoundTransportAddress, DiscoveryNode> boundTransportAddressDiscoveryNodeFunction = address -> {
             discoveryNode.set(new DiscoveryNode(name, address.publishAddress(), emptyMap(), emptySet(), Version.CURRENT));
             return discoveryNode.get();
         };
         transportService = new TransportService(
-            settings,
+            Settings.EMPTY,
             new MockNioTransport(
-                settings,
+                Settings.EMPTY,
                 Version.CURRENT,
                 threadPool,
                 new NetworkService(Collections.emptyList()),
@@ -92,7 +101,10 @@ public class FakeNode implements Releasable {
         };
 
         transportService.start();
-        clusterService = createClusterService(threadPool, discoveryNode.get());
+        Set<Setting<?>> internalSettings = new HashSet<>(ClusterSettings.BUILT_IN_CLUSTER_SETTINGS);
+        internalSettings.addAll(settingsSet);
+        ClusterSettings clusterSettings = new ClusterSettings(nodeSettings, internalSettings);
+        clusterService = createClusterService(threadPool, discoveryNode.get(), clusterSettings);
         clusterService.addStateApplier(transportService.getTaskManager());
         ActionFilters actionFilters = new ActionFilters(emptySet());
         transportListTasksAction = new TransportListTasksAction(clusterService, transportService, actionFilters);
@@ -100,8 +112,8 @@ public class FakeNode implements Releasable {
         transportService.acceptIncomingRequests();
     }
 
-    public FakeNode(String name, ThreadPool threadPool, Settings settings) {
-        this(name, threadPool, settings, TransportService.NOOP_TRANSPORT_INTERCEPTOR);
+    public FakeNode(String name, ThreadPool threadPool, Set<Setting<?>> settings) {
+        this(name, threadPool, Settings.EMPTY, settings, TransportService.NOOP_TRANSPORT_INTERCEPTOR);
     }
 
     public final ClusterService clusterService;

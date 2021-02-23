@@ -3,4 +3,5 @@ grant {
   permission java.lang.RuntimePermission "accessDeclaredMembers";
   permission java.lang.RuntimePermission "accessClassInPackage.sun.misc";
   permission java.net.SocketPermission "*", "connect,resolve";
+  permission java.lang.RuntimePermission "accessDeclaredMembers";
 };

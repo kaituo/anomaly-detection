@@ -18,7 +18,6 @@ package com.amazon.opendistroforelasticsearch.ad.ratelimit;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Locale;
 import java.util.Random;
 import java.util.concurrent.Semaphore;
 
@@ -30,6 +29,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorPlugin;
+import com.amazon.opendistroforelasticsearch.ad.NodeStateManager;
 import com.amazon.opendistroforelasticsearch.ad.breaker.ADCircuitBreakerService;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 
@@ -67,10 +67,15 @@ public abstract class ConcurrentQueue<RequestType extends QueuedRequest> extends
      * @param settings Cluster settings getter
      * @param maxQueuedTaskRatio maximum queued tasks ratio in ES threadpools
      * @param clock Clock to get current time
+     * @param mediumSegmentPruneRatio the percent of medium priority requests to prune when the queue is full
+     * @param lowSegmentPruneRatio the percent of low priority requests to prune when the queue is full
+     * @param maintenanceFreqConstant a constant help define the frequency of maintenance.  We cannot do
+     *   the expensive maintenance too often.
      * @param clientUtil utility with ES client
      * @param concurrencySetting Max concurrent processing of the queued events
      * @param executionTtl Max execution time of a single request
      * @param stateTtl max idle state duration.  Used to clean unused states.
+     * @param nodeStateManager node state accessor
      */
     public ConcurrentQueue(
         String queueName,
@@ -90,7 +95,8 @@ public abstract class ConcurrentQueue<RequestType extends QueuedRequest> extends
         ClientUtil clientUtil,
         Setting<Integer> concurrencySetting,
         Duration executionTtl,
-        Duration stateTtl
+        Duration stateTtl,
+        NodeStateManager nodeStateManager
     ) {
         super(
             queueName,
@@ -107,7 +113,8 @@ public abstract class ConcurrentQueue<RequestType extends QueuedRequest> extends
             mediumSegmentPruneRatio,
             lowSegmentPruneRatio,
             maintenanceFreqConstant,
-            stateTtl
+            stateTtl,
+            nodeStateManager
         );
 
         this.permits = new Semaphore(concurrencySetting.get(settings));
@@ -141,8 +148,9 @@ public abstract class ConcurrentQueue<RequestType extends QueuedRequest> extends
                         process();
                     }, () -> { permits.release(); });
                 } catch (Exception e) {
-                    LOG.error(String.format(Locale.ROOT, "Failed to process requests from %s", getQueueName()), e);
                     permits.release();
+                    // throw to the root level to catch
+                    throw e;
                 }
             }
         });

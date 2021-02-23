@@ -17,11 +17,11 @@ package com.amazon.opendistroforelasticsearch.ad;
 
 import static com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector.ANOMALY_DETECTORS_INDEX;
 import static com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob.ANOMALY_DETECTOR_JOB_INDEX;
-import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.CATEGORY_FIELD_LIMIT;
 import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpectedToken;
 
 import java.security.InvalidParameterException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -32,6 +32,7 @@ import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.get.GetRequest;
 import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.client.Client;
+import org.elasticsearch.cluster.routing.Preference;
 import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentParser;
@@ -49,11 +50,13 @@ import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyResult;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.model.EntityProfile;
 import com.amazon.opendistroforelasticsearch.ad.model.EntityProfileName;
 import com.amazon.opendistroforelasticsearch.ad.model.EntityState;
 import com.amazon.opendistroforelasticsearch.ad.model.InitProgressProfile;
 import com.amazon.opendistroforelasticsearch.ad.model.IntervalTimeConfiguration;
+import com.amazon.opendistroforelasticsearch.ad.settings.NumericSetting;
 import com.amazon.opendistroforelasticsearch.ad.transport.EntityProfileAction;
 import com.amazon.opendistroforelasticsearch.ad.transport.EntityProfileRequest;
 import com.amazon.opendistroforelasticsearch.ad.transport.EntityProfileResponse;
@@ -64,6 +67,7 @@ public class EntityProfileRunner extends AbstractProfileRunner {
     private final Logger logger = LogManager.getLogger(EntityProfileRunner.class);
 
     static final String NOT_HC_DETECTOR_ERR_MSG = "This is not a high cardinality detector";
+    static final String NO_ENTITY = "Cannot find entity";
     private Client client;
     private NamedXContentRegistry xContentRegistry;
 
@@ -83,7 +87,7 @@ public class EntityProfileRunner extends AbstractProfileRunner {
      */
     public void profile(
         String detectorId,
-        String entityValue,
+        Entity entityValue,
         Set<EntityProfileName> profilesToCollect,
         ActionListener<EntityProfile> listener
     ) {
@@ -102,16 +106,15 @@ public class EntityProfileRunner extends AbstractProfileRunner {
                 ) {
                     ensureExpectedToken(XContentParser.Token.START_OBJECT, parser.nextToken(), parser);
                     AnomalyDetector detector = AnomalyDetector.parse(parser, detectorId);
-                    List<String> categoryField = detector.getCategoryField();
-                    if (categoryField == null || categoryField.size() == 0) {
+                    List<String> categoryFields = detector.getCategoryField();
+                    int maxCategoryFields = NumericSetting.maxCategoricalFields();
+                    if (categoryFields == null || categoryFields.size() == 0) {
                         listener.onFailure(new InvalidParameterException(NOT_HC_DETECTOR_ERR_MSG));
-                    } else if (categoryField.size() > CATEGORY_FIELD_LIMIT) {
+                    } else if (categoryFields.size() > maxCategoryFields) {
                         listener
-                            .onFailure(
-                                new InvalidParameterException(CommonErrorMessages.CATEGORICAL_FIELD_NUMBER_SURPASSED + CATEGORY_FIELD_LIMIT)
-                            );
+                            .onFailure(new InvalidParameterException(CommonErrorMessages.getTooManyCategoricalFieldErr(maxCategoryFields)));
                     } else {
-                        prepareEntityProfile(listener, detectorId, entityValue, profilesToCollect, detector, categoryField.get(0));
+                        validateEntity(entityValue, categoryFields, detectorId, profilesToCollect, detector, listener);
                     }
                 } catch (Exception t) {
                     listener.onFailure(t);
@@ -122,10 +125,56 @@ public class EntityProfileRunner extends AbstractProfileRunner {
         }, listener::onFailure));
     }
 
+    private void validateEntity(
+        Entity entity,
+        List<String> categoryFields,
+        String detectorId,
+        Set<EntityProfileName> profilesToCollect,
+        AnomalyDetector detector,
+        ActionListener<EntityProfile> listener
+    ) {
+        Map<String, String> attributes = entity.getAttributes();
+        if (attributes == null || attributes.size() != categoryFields.size()) {
+            listener.onFailure(new InvalidParameterException("Empty entity attributes"));
+            return;
+        }
+        for (String field : categoryFields) {
+            if (false == attributes.containsKey(field)) {
+                listener.onFailure(new InvalidParameterException("Cannot find " + field));
+                return;
+            }
+        }
+
+        BoolQueryBuilder internalFilterQuery = QueryBuilders.boolQuery().filter(detector.getFilterQuery());
+
+        for (TermQueryBuilder term : entity.getTermQueryBuilders()) {
+            internalFilterQuery.filter(term);
+        }
+
+        SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder().query(internalFilterQuery).size(1);
+
+        SearchRequest searchRequest = new SearchRequest(detector.getIndices().toArray(new String[0]), searchSourceBuilder)
+            .preference(Preference.LOCAL.toString());
+
+        client.search(searchRequest, ActionListener.wrap(searchResponse -> {
+            try {
+                if (searchResponse.getHits().getHits().length == 0) {
+                    listener.onFailure(new InvalidParameterException(NO_ENTITY));
+                    return;
+                }
+                prepareEntityProfile(listener, detectorId, entity, profilesToCollect, detector, categoryFields.get(0));
+            } catch (Exception e) {
+                listener.onFailure(new InvalidParameterException(NO_ENTITY));
+                return;
+            }
+        }, e -> listener.onFailure(new InvalidParameterException(NO_ENTITY))));
+
+    }
+
     private void prepareEntityProfile(
         ActionListener<EntityProfile> listener,
         String detectorId,
-        String entityValue,
+        Entity entityValue,
         Set<EntityProfileName> profilesToCollect,
         AnomalyDetector detector,
         String categoryField
@@ -136,18 +185,13 @@ public class EntityProfileRunner extends AbstractProfileRunner {
             .execute(
                 EntityProfileAction.INSTANCE,
                 request,
-                ActionListener
-                    .wrap(
-                        r -> getJob(detectorId, categoryField, entityValue, profilesToCollect, detector, r, listener),
-                        listener::onFailure
-                    )
+                ActionListener.wrap(r -> getJob(detectorId, entityValue, profilesToCollect, detector, r, listener), listener::onFailure)
             );
     }
 
     private void getJob(
         String detectorId,
-        String categoryField,
-        String entityValue,
+        Entity entityValue,
         Set<EntityProfileName> profilesToCollect,
         AnomalyDetector detector,
         EntityProfileResponse entityProfileResponse,
@@ -184,7 +228,7 @@ public class EntityProfileRunner extends AbstractProfileRunner {
                         );
 
                     if (profilesToCollect.contains(EntityProfileName.MODELS)) {
-                        EntityProfile.Builder builder = new EntityProfile.Builder(categoryField, entityValue);
+                        EntityProfile.Builder builder = new EntityProfile.Builder();
                         if (false == job.isEnabled()) {
                             delegateListener.onResponse(builder.build());
                         } else {
@@ -197,7 +241,6 @@ public class EntityProfileRunner extends AbstractProfileRunner {
                         profileStateRelated(
                             entityProfileResponse.getTotalUpdates(),
                             detectorId,
-                            categoryField,
                             entityValue,
                             profilesToCollect,
                             detector,
@@ -210,7 +253,7 @@ public class EntityProfileRunner extends AbstractProfileRunner {
                         long enabledTimeMs = job.getEnabledTime().toEpochMilli();
                         SearchRequest lastSampleTimeRequest = createLastSampleTimeRequest(detectorId, enabledTimeMs, entityValue);
 
-                        EntityProfile.Builder builder = new EntityProfile.Builder(categoryField, entityValue);
+                        EntityProfile.Builder builder = new EntityProfile.Builder();
 
                         Optional<Boolean> isActiveOp = entityProfileResponse.isActive();
                         if (isActiveOp.isPresent()) {
@@ -242,12 +285,12 @@ public class EntityProfileRunner extends AbstractProfileRunner {
                     listener.onFailure(e);
                 }
             } else {
-                sendUnknownState(profilesToCollect, categoryField, entityValue, true, listener);
+                sendUnknownState(profilesToCollect, entityValue, true, listener);
             }
         }, exception -> {
             if (exception instanceof IndexNotFoundException) {
                 logger.info(exception.getMessage());
-                sendUnknownState(profilesToCollect, categoryField, entityValue, true, listener);
+                sendUnknownState(profilesToCollect, entityValue, true, listener);
             } else {
                 logger.error(CommonErrorMessages.FAIL_TO_GET_PROFILE_MSG + detectorId, exception);
                 listener.onFailure(exception);
@@ -258,40 +301,37 @@ public class EntityProfileRunner extends AbstractProfileRunner {
     private void profileStateRelated(
         long totalUpdates,
         String detectorId,
-        String categoryField,
-        String entityValue,
+        Entity entityValue,
         Set<EntityProfileName> profilesToCollect,
         AnomalyDetector detector,
         AnomalyDetectorJob job,
         MultiResponsesDelegateActionListener<EntityProfile> delegateListener
     ) {
         if (totalUpdates == 0) {
-            sendUnknownState(profilesToCollect, categoryField, entityValue, false, delegateListener);
+            sendUnknownState(profilesToCollect, entityValue, false, delegateListener);
         } else if (false == job.isEnabled()) {
-            sendUnknownState(profilesToCollect, categoryField, entityValue, false, delegateListener);
+            sendUnknownState(profilesToCollect, entityValue, false, delegateListener);
         } else if (totalUpdates >= requiredSamples) {
-            sendRunningState(profilesToCollect, categoryField, entityValue, delegateListener);
+            sendRunningState(profilesToCollect, entityValue, delegateListener);
         } else {
-            sendInitState(profilesToCollect, categoryField, entityValue, detector, totalUpdates, delegateListener);
+            sendInitState(profilesToCollect, entityValue, detector, totalUpdates, delegateListener);
         }
     }
 
     /**
      * Send unknown state back
      * @param profilesToCollect Profiles to Collect
-     * @param categoryField Category field
      * @param entityValue Entity value
      * @param immediate whether we should terminate workflow and respond immediately
      * @param delegateListener Delegate listener
      */
     private void sendUnknownState(
         Set<EntityProfileName> profilesToCollect,
-        String categoryField,
-        String entityValue,
+        Entity entityValue,
         boolean immediate,
         ActionListener<EntityProfile> delegateListener
     ) {
-        EntityProfile.Builder builder = new EntityProfile.Builder(categoryField, entityValue);
+        EntityProfile.Builder builder = new EntityProfile.Builder();
         if (profilesToCollect.contains(EntityProfileName.STATE)) {
             builder.state(EntityState.UNKNOWN);
         }
@@ -304,11 +344,10 @@ public class EntityProfileRunner extends AbstractProfileRunner {
 
     private void sendRunningState(
         Set<EntityProfileName> profilesToCollect,
-        String categoryField,
-        String entityValue,
+        Entity entityValue,
         MultiResponsesDelegateActionListener<EntityProfile> delegateListener
     ) {
-        EntityProfile.Builder builder = new EntityProfile.Builder(categoryField, entityValue);
+        EntityProfile.Builder builder = new EntityProfile.Builder();
         if (profilesToCollect.contains(EntityProfileName.STATE)) {
             builder.state(EntityState.RUNNING);
         }
@@ -321,13 +360,12 @@ public class EntityProfileRunner extends AbstractProfileRunner {
 
     private void sendInitState(
         Set<EntityProfileName> profilesToCollect,
-        String categoryField,
-        String entityValue,
+        Entity entityValue,
         AnomalyDetector detector,
         long updates,
         MultiResponsesDelegateActionListener<EntityProfile> delegateListener
     ) {
-        EntityProfile.Builder builder = new EntityProfile.Builder(categoryField, entityValue);
+        EntityProfile.Builder builder = new EntityProfile.Builder();
         if (profilesToCollect.contains(EntityProfileName.STATE)) {
             builder.state(EntityState.INIT);
         }
@@ -339,14 +377,55 @@ public class EntityProfileRunner extends AbstractProfileRunner {
         delegateListener.onResponse(builder.build());
     }
 
-    private SearchRequest createLastSampleTimeRequest(String detectorId, long enabledTime, String entityValue) {
+    private SearchRequest createLastSampleTimeRequest(String detectorId, long enabledTime, Entity entity) {
         BoolQueryBuilder boolQueryBuilder = new BoolQueryBuilder();
 
         String path = "entity";
-        String entityValueFieldName = path + ".value";
-        TermQueryBuilder entityValueFilterQuery = QueryBuilders.termQuery(entityValueFieldName, entityValue);
-        NestedQueryBuilder nestedQueryBuilder = new NestedQueryBuilder(path, entityValueFilterQuery, ScoreMode.None);
-        boolQueryBuilder.filter(nestedQueryBuilder);
+        String entityName = path + ".name";
+        String entityValue = path + ".value";
+
+        for (Map.Entry<String, String> attribute : entity.getAttributes().entrySet()) {
+            /*
+             * each attribute pair corresponds to a nested query like
+            "nested": {
+            "query": {
+              "bool": {
+                "filter": [
+                  {
+                    "term": {
+                      "entity.name": {
+                        "value": "turkey4",
+                        "boost": 1
+                      }
+                    }
+                  },
+                  {
+                    "term": {
+                      "entity.value": {
+                        "value": "Turkey",
+                        "boost": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "path": "entity",
+            "ignore_unmapped": false,
+            "score_mode": "none",
+            "boost": 1
+            }
+            },*/
+            BoolQueryBuilder nestedBoolQueryBuilder = new BoolQueryBuilder();
+
+            TermQueryBuilder entityNameFilterQuery = QueryBuilders.termQuery(entityName, attribute.getKey());
+            nestedBoolQueryBuilder.filter(entityNameFilterQuery);
+            TermQueryBuilder entityValueFilterQuery = QueryBuilders.termQuery(entityValue, attribute.getValue());
+            nestedBoolQueryBuilder.filter(entityValueFilterQuery);
+
+            NestedQueryBuilder nestedNameQueryBuilder = new NestedQueryBuilder(path, nestedBoolQueryBuilder, ScoreMode.None);
+            boolQueryBuilder.filter(nestedNameQueryBuilder);
+        }
 
         boolQueryBuilder.filter(QueryBuilders.termQuery(AnomalyResult.DETECTOR_ID_FIELD, detectorId));
 

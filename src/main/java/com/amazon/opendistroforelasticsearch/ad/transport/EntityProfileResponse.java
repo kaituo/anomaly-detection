@@ -28,7 +28,7 @@ import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
-import com.amazon.opendistroforelasticsearch.ad.model.ModelProfile;
+import com.amazon.opendistroforelasticsearch.ad.model.ModelProfileOnNode;
 
 public class EntityProfileResponse extends ActionResponse implements ToXContentObject {
     public static final String ACTIVE = "active";
@@ -37,13 +37,13 @@ public class EntityProfileResponse extends ActionResponse implements ToXContentO
     private final Boolean isActive;
     private final long lastActiveMs;
     private final long totalUpdates;
-    private final ModelProfile modelProfile;
+    private final ModelProfileOnNode modelProfile;
 
     public static class Builder {
         private Boolean isActive = null;
         private long lastActiveMs = -1L;
         private long totalUpdates = -1L;
-        private ModelProfile modelProfile = null;
+        private ModelProfileOnNode modelProfile = null;
 
         public Builder() {}
 
@@ -62,7 +62,7 @@ public class EntityProfileResponse extends ActionResponse implements ToXContentO
             return this;
         }
 
-        public Builder setModelProfile(ModelProfile modelProfile) {
+        public Builder setModelProfile(ModelProfileOnNode modelProfile) {
             this.modelProfile = modelProfile;
             return this;
         }
@@ -72,7 +72,7 @@ public class EntityProfileResponse extends ActionResponse implements ToXContentO
         }
     }
 
-    public EntityProfileResponse(Boolean isActive, long lastActiveTimeMs, long totalUpdates, ModelProfile modelProfile) {
+    public EntityProfileResponse(Boolean isActive, long lastActiveTimeMs, long totalUpdates, ModelProfileOnNode modelProfile) {
         this.isActive = isActive;
         this.lastActiveMs = lastActiveTimeMs;
         this.totalUpdates = totalUpdates;
@@ -85,7 +85,7 @@ public class EntityProfileResponse extends ActionResponse implements ToXContentO
         lastActiveMs = in.readLong();
         totalUpdates = in.readLong();
         if (in.readBoolean()) {
-            modelProfile = new ModelProfile(in);
+            modelProfile = new ModelProfileOnNode(in);
         } else {
             modelProfile = null;
         }
@@ -103,7 +103,7 @@ public class EntityProfileResponse extends ActionResponse implements ToXContentO
         return totalUpdates;
     }
 
-    public ModelProfile getModelProfile() {
+    public ModelProfileOnNode getModelProfile() {
         return modelProfile;
     }
 

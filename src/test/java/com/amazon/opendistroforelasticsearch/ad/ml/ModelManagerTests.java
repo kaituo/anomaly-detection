@@ -72,6 +72,7 @@ import org.powermock.modules.junit4.PowerMockRunner;
 import org.powermock.modules.junit4.PowerMockRunnerDelegate;
 
 import test.com.amazon.opendistroforelasticsearch.ad.util.MLUtil;
+import test.com.amazon.opendistroforelasticsearch.ad.util.RandomModelStateConfig;
 
 import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorPlugin;
 import com.amazon.opendistroforelasticsearch.ad.MemoryTracker;
@@ -1220,20 +1221,21 @@ public class ModelManagerTests {
 
     @Test
     public void processEmptyCheckpoint() {
-        ModelState<EntityModel> modelState = MLUtil.randomModelStateWithSample(false, numMinSamples - 1);
-        modelManager.processEntityCheckpoint(Optional.empty(), modelId, entityName, modelState);
+        ModelState<EntityModel> modelState = MLUtil
+            .randomModelState(new RandomModelStateConfig.Builder().fullModel(false).sampleSize(numMinSamples - 1).build());
+        modelManager.processEntityCheckpoint(Optional.empty(), modelState);
         assertEquals(Instant.MIN, modelState.getLastCheckpointTime());
     }
 
     @Test
     public void processNonEmptyCheckpoint() {
         EntityModel model = MLUtil.createNonEmptyModel(modelId);
-        ModelState<EntityModel> modelState = MLUtil.randomModelStateWithSample(false, numMinSamples);
+        ModelState<EntityModel> modelState = MLUtil
+            .randomModelState(new RandomModelStateConfig.Builder().fullModel(false).sampleSize(numMinSamples).clock(clock).build());
         Instant checkpointTime = Instant.ofEpochMilli(1000);
-        modelManager
-            .processEntityCheckpoint(Optional.of(new SimpleImmutableEntry<>(model, checkpointTime)), modelId, entityName, modelState);
+        modelManager.processEntityCheckpoint(Optional.of(new SimpleImmutableEntry<>(model, checkpointTime)), modelState);
         assertEquals(checkpointTime, modelState.getLastCheckpointTime());
-        assertEquals(0, modelState.getModel().getSamples().size());
+        assertEquals(model.getSamples().size(), modelState.getModel().getSamples().size());
         assertEquals(now, modelState.getLastUsedTime());
     }
 }

@@ -312,6 +312,23 @@ List<String> jacocoExclusions = [
         'com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices',
         'com.amazon.opendistroforelasticsearch.ad.transport.handler.MultiEntityResultHandler',
         'com.amazon.opendistroforelasticsearch.ad.util.ThrowingSupplierWrapper',
+        'com.amazon.opendistroforelasticsearch.ad.ratelimit.*',
+        'com.amazon.opendistroforelasticsearch.ad.transport.EntityResultTransportAction',
+        'com.amazon.opendistroforelasticsearch.ad.transport.EntityResultTransportAction.*',
+        'com.amazon.opendistroforelasticsearch.ad.transport.AnomalyResultTransportAction.*',
+        'com.amazon.opendistroforelasticsearch.ad.transport.ProfileNodeResponse',
+        'com.amazon.opendistroforelasticsearch.ad.transport.ADResultBulkResponse',
+        'com.amazon.opendistroforelasticsearch.ad.transport.AggregationType',
+        'com.amazon.opendistroforelasticsearch.ad.EntityProfileRunner',
+        'com.amazon.opendistroforelasticsearch.ad.NodeStateManager',
+        'com.amazon.opendistroforelasticsearch.ad.util.BulkUtil',
+        'com.amazon.opendistroforelasticsearch.ad.util.ExceptionUtil',
+        'com.amazon.opendistroforelasticsearch.ad.feature.SearchFeatureDao',
+        'com.amazon.opendistroforelasticsearch.ad.feature.CompositeRetriever.*',
+        'com.amazon.opendistroforelasticsearch.ad.feature.ScriptMaker',
+        'com.amazon.opendistroforelasticsearch.ad.ml.EntityModel',
+        'com.amazon.opendistroforelasticsearch.ad.caching.PriorityCache',
+        'com.amazon.opendistroforelasticsearch.ad.ml.CheckpointDao',
 ]
 
 jacocoTestCoverageVerification {

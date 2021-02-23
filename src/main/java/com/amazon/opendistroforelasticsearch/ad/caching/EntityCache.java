@@ -17,18 +17,20 @@ package com.amazon.opendistroforelasticsearch.ad.caching;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 
 import org.apache.commons.lang3.tuple.Pair;
 
 import com.amazon.opendistroforelasticsearch.ad.CleanState;
 import com.amazon.opendistroforelasticsearch.ad.DetectorModelSize;
-import com.amazon.opendistroforelasticsearch.ad.EntityModelSize;
 import com.amazon.opendistroforelasticsearch.ad.MaintenanceState;
 import com.amazon.opendistroforelasticsearch.ad.ml.EntityModel;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelState;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
+import com.amazon.opendistroforelasticsearch.ad.model.ModelProfile;
 
-public interface EntityCache extends MaintenanceState, CleanState, DetectorModelSize, EntityModelSize {
+public interface EntityCache extends MaintenanceState, CleanState, DetectorModelSize {
     /**
      * Get the ModelState associated with the entity.  May or may not load the
      * ModelState depending on the underlying cache's eviction policy.
@@ -113,11 +115,22 @@ public interface EntityCache extends MaintenanceState, CleanState, DetectorModel
      * @return A list of entities that are admitted into the cache as a result of the
      *  update and the left-over entities
      */
-    Pair<List<String>, List<String>> selectUpdateCandidate(
-        Collection<String> cacheMissEntities,
+    Pair<List<Entity>, List<Entity>> selectUpdateCandidate(
+        Collection<Entity> cacheMissEntities,
         String detectorId,
         AnomalyDetector detector
     );
 
     boolean hostIfPossible(AnomalyDetector detector, ModelState<EntityModel> toUpdate);
+
+    List<ModelProfile> getAllModelProfile(String detectorId);
+
+    /**
+     * Gets an entity's model sizes
+     *
+     * @param detectorId Detector Id
+     * @param entityModelId Entity's model Id
+     * @return the entity's memory size
+     */
+    Optional<ModelProfile> getModelProfile(String detectorId, String entityModelId);
 }

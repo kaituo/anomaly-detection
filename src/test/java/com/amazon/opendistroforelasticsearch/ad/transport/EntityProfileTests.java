@@ -25,7 +25,9 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -63,9 +65,10 @@ import com.amazon.opendistroforelasticsearch.ad.cluster.HashRing;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.AnomalyDetectionException;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.JsonPathNotFoundException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
-import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.model.EntityProfileName;
 import com.amazon.opendistroforelasticsearch.ad.model.ModelProfile;
+import com.amazon.opendistroforelasticsearch.ad.model.ModelProfileOnNode;
 
 public class EntityProfileTests extends AbstractADTest {
     private String detectorId = "yecrdnUBqurvo9uKU_d8";
@@ -78,7 +81,6 @@ public class EntityProfileTests extends AbstractADTest {
     private ActionFilters actionFilters;
     private TransportService transportService;
     private Settings settings;
-    private ModelManager modelManager;
     private ClusterService clusterService;
     private CacheProvider cacheProvider;
     private EntityProfileTransportAction action;
@@ -92,6 +94,8 @@ public class EntityProfileTests extends AbstractADTest {
     private long modelSize = 712480L;
     private boolean isActive = Boolean.TRUE;
     private TransportInterceptor normalTransportInterceptor, failureTransportInterceptor;
+    private String categoryName = "field";
+    private Entity entity;
 
     @BeforeClass
     public static void setUpBeforeClass() {
@@ -130,9 +134,7 @@ public class EntityProfileTests extends AbstractADTest {
         );
         settings = Settings.EMPTY;
 
-        modelManager = mock(ModelManager.class);
         modelId = "yecrdnUBqurvo9uKU_d8_entity_app_0";
-        when(modelManager.getEntityModelId(anyString(), anyString())).thenReturn(modelId);
 
         clusterService = mock(ClusterService.class);
 
@@ -142,23 +144,19 @@ public class EntityProfileTests extends AbstractADTest {
         when(cache.getTotalUpdates(anyString(), anyString())).thenReturn(updates);
         when(cache.isActive(anyString(), anyString())).thenReturn(isActive);
         when(cache.getLastActiveMs(anyString(), anyString())).thenReturn(lastActiveTimestamp);
-        when(cache.getModelSize(anyString(), anyString())).thenReturn(modelSize);
+        Map<String, Long> modelSizeMap = new HashMap<>();
+        modelSizeMap.put(modelId, modelSize);
+        when(cache.getModelSize(anyString())).thenReturn(modelSizeMap);
         when(cacheProvider.get()).thenReturn(cache);
 
-        action = new EntityProfileTransportAction(
-            actionFilters,
-            transportService,
-            settings,
-            modelManager,
-            hashRing,
-            clusterService,
-            cacheProvider
-        );
+        action = new EntityProfileTransportAction(actionFilters, transportService, settings, hashRing, clusterService, cacheProvider);
 
         future = new PlainActionFuture<>();
         transportAddress1 = new TransportAddress(new InetSocketAddress(InetAddress.getByName("1.2.3.4"), 9300));
 
-        request = new EntityProfileRequest(detectorId, entityValue, state);
+        entity = Entity.createSingleAttributeEntity(detectorId, categoryName, entityValue);
+
+        request = new EntityProfileRequest(detectorId, entity, state);
 
         normalTransportInterceptor = new TransportInterceptor() {
             @Override
@@ -265,7 +263,6 @@ public class EntityProfileTests extends AbstractADTest {
             new ActionFilters(Collections.emptySet()),
             node.transportService,
             Settings.EMPTY,
-            modelManager,
             hashRing,
             node.clusterService,
             cacheProvider
@@ -294,21 +291,16 @@ public class EntityProfileTests extends AbstractADTest {
         when(hashRing.getOwningNode(anyString())).thenReturn(Optional.of(localNode));
         when(clusterService.localNode()).thenReturn(localNode);
 
-        request = new EntityProfileRequest(detectorId, entityValue, all);
+        request = new EntityProfileRequest(detectorId, entity, all);
         action.doExecute(task, request, future);
 
-        EntityProfileResponse expectedResponse = new EntityProfileResponse(
-            isActive,
-            lastActiveTimestamp,
-            updates,
-            new ModelProfile(modelId, modelSize, nodeId)
-        );
+        EntityProfileResponse expectedResponse = new EntityProfileResponse(isActive, lastActiveTimestamp, updates, null);
         EntityProfileResponse response = future.actionGet(20_000);
         assertEquals(expectedResponse, response);
     }
 
     public void testGetRemoteUpdateResponse() {
-        setupTestNodes(Settings.EMPTY, normalTransportInterceptor);
+        setupTestNodes(normalTransportInterceptor);
         try {
             TransportService realTransportService = testNodes[0].transportService;
             clusterService = testNodes[0].clusterService;
@@ -317,7 +309,6 @@ public class EntityProfileTests extends AbstractADTest {
                 actionFilters,
                 realTransportService,
                 settings,
-                modelManager,
                 hashRing,
                 clusterService,
                 cacheProvider
@@ -338,7 +329,7 @@ public class EntityProfileTests extends AbstractADTest {
     }
 
     public void testGetRemoteFailureResponse() {
-        setupTestNodes(Settings.EMPTY, failureTransportInterceptor);
+        setupTestNodes(failureTransportInterceptor);
         try {
             TransportService realTransportService = testNodes[0].transportService;
             clusterService = testNodes[0].clusterService;
@@ -347,7 +338,6 @@ public class EntityProfileTests extends AbstractADTest {
                 actionFilters,
                 realTransportService,
                 settings,
-                modelManager,
                 hashRing,
                 clusterService,
                 cacheProvider
@@ -368,17 +358,17 @@ public class EntityProfileTests extends AbstractADTest {
         long lastActiveTimestamp = 10L;
         EntityProfileResponse.Builder builder = new EntityProfileResponse.Builder();
         builder.setLastActiveMs(lastActiveTimestamp).build();
-        builder.setModelProfile(new ModelProfile(modelId, modelSize, nodeId));
+        builder.setModelProfile(new ModelProfileOnNode(nodeId, new ModelProfile(modelId, entity, modelSize)));
         EntityProfileResponse response = builder.build();
         String json = TestHelpers.xContentBuilderToString(response.toXContent(TestHelpers.builder(), ToXContent.EMPTY_PARAMS));
         assertEquals(lastActiveTimestamp, JsonDeserializer.getLongValue(json, EntityProfileResponse.LAST_ACTIVE_TS));
-        assertEquals(modelSize, JsonDeserializer.getChildNode(json, CommonName.MODEL, ModelProfile.MODEL_SIZE_IN_BYTES).getAsLong());
+        assertEquals(modelSize, JsonDeserializer.getChildNode(json, CommonName.MODEL, CommonName.MODEL_SIZE_IN_BYTES).getAsLong());
     }
 
     public void testSerialzationResponse() throws IOException {
         EntityProfileResponse.Builder builder = new EntityProfileResponse.Builder();
         builder.setLastActiveMs(lastActiveTimestamp).build();
-        ModelProfile model = new ModelProfile(modelId, modelSize, nodeId);
+        ModelProfileOnNode model = new ModelProfileOnNode(nodeId, new ModelProfile(modelId, entity, modelSize));
         builder.setModelProfile(model);
         EntityProfileResponse response = builder.build();
 
@@ -394,7 +384,7 @@ public class EntityProfileTests extends AbstractADTest {
     public void testResponseHashCodeEquals() {
         EntityProfileResponse.Builder builder = new EntityProfileResponse.Builder();
         builder.setLastActiveMs(lastActiveTimestamp).build();
-        ModelProfile model = new ModelProfile(modelId, modelSize, nodeId);
+        ModelProfileOnNode model = new ModelProfileOnNode(nodeId, new ModelProfile(modelId, entity, modelSize));
         builder.setModelProfile(model);
         EntityProfileResponse response = builder.build();
 

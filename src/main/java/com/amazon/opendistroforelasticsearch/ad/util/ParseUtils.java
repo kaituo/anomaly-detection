@@ -71,6 +71,7 @@ import org.elasticsearch.search.builder.SearchSourceBuilder;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.AnomalyDetectionException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.model.Feature;
 import com.amazon.opendistroforelasticsearch.ad.model.FeatureData;
 import com.amazon.opendistroforelasticsearch.ad.model.IntervalTimeConfiguration;
@@ -381,12 +382,15 @@ public final class ParseUtils {
     public static SearchSourceBuilder generateEntityColdStartQuery(
         AnomalyDetector detector,
         List<Entry<Long, Long>> ranges,
-        String entityName,
+        Entity entity,
         NamedXContentRegistry xContentRegistry
     ) throws IOException {
 
-        TermQueryBuilder term = new TermQueryBuilder(detector.getCategoryField().get(0), entityName);
-        BoolQueryBuilder internalFilterQuery = QueryBuilders.boolQuery().filter(detector.getFilterQuery()).filter(term);
+        BoolQueryBuilder internalFilterQuery = QueryBuilders.boolQuery().filter(detector.getFilterQuery());
+
+        for (TermQueryBuilder term : entity.getTermQueryBuilders()) {
+            internalFilterQuery.filter(term);
+        }
 
         DateRangeAggregationBuilder dateRangeBuilder = dateRange("date_range").field(detector.getTimeField()).format("epoch_millis");
         for (Entry<Long, Long> range : ranges) {

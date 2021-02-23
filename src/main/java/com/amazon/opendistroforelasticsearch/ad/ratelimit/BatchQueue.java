@@ -22,7 +22,6 @@ import java.util.Random;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.ThreadedActionListener;
 import org.elasticsearch.cluster.service.ClusterService;
@@ -31,6 +30,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import com.amazon.opendistroforelasticsearch.ad.AnomalyDetectorPlugin;
+import com.amazon.opendistroforelasticsearch.ad.NodeStateManager;
 import com.amazon.opendistroforelasticsearch.ad.breaker.ADCircuitBreakerService;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 
@@ -64,7 +64,8 @@ public abstract class BatchQueue<RequestType extends QueuedRequest, BatchRequest
         Setting<Integer> concurrencySetting,
         Duration executionTtl,
         Setting<Integer> batchSizeSetting,
-        Duration stateTtl
+        Duration stateTtl,
+        NodeStateManager nodeStateManager
     ) {
         super(
             queueName,
@@ -84,7 +85,8 @@ public abstract class BatchQueue<RequestType extends QueuedRequest, BatchRequest
             clientUtil,
             concurrencySetting,
             executionTtl,
-            stateTtl
+            stateTtl,
+            nodeStateManager
         );
         this.batchSize = batchSizeSetting.get(settings);
         clusterService.getClusterSettings().addSettingsUpdateConsumer(batchSizeSetting, it -> batchSize = it);
@@ -111,25 +113,20 @@ public abstract class BatchQueue<RequestType extends QueuedRequest, BatchRequest
         List<RequestType> toProcess = getRequests(batchSize);
 
         // it is possible other concurrent threads have drained the queue
-        try {
-            if (false == toProcess.isEmpty()) {
-                BatchRequestType batchRequest = toBatchRequest(toProcess);
+        if (false == toProcess.isEmpty()) {
+            BatchRequestType batchRequest = toBatchRequest(toProcess);
 
-                ThreadedActionListener<BatchResponseType> listener = new ThreadedActionListener<>(
-                    LOG,
-                    threadPool,
-                    AnomalyDetectorPlugin.AD_THREAD_POOL_NAME,
-                    getResponseListener(toProcess, batchRequest),
-                    false
-                );
+            ThreadedActionListener<BatchResponseType> listener = new ThreadedActionListener<>(
+                LOG,
+                threadPool,
+                AnomalyDetectorPlugin.AD_THREAD_POOL_NAME,
+                getResponseListener(toProcess, batchRequest),
+                false
+            );
 
-                final ActionListener<BatchResponseType> listenerWithRelease = ActionListener.runAfter(listener, afterProcessCallback);
-                executeBatchRequest(batchRequest, listenerWithRelease);
-            } else {
-                emptyQueueCallback.run();
-            }
-        } catch (Exception e) {
-            LOG.error(new ParameterizedMessage("Fail to execute requests in [{}]", this.queueName), e);
+            final ActionListener<BatchResponseType> listenerWithRelease = ActionListener.runAfter(listener, afterProcessCallback);
+            executeBatchRequest(batchRequest, listenerWithRelease);
+        } else {
             emptyQueueCallback.run();
         }
     }

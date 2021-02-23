@@ -40,7 +40,7 @@ public class MemoryTracker {
 
     public enum Origin {
         SINGLE_ENTITY_DETECTOR,
-        MULTI_ENTITY_DETECTOR,
+        HC_DETECTOR,
         HISTORICAL_SINGLE_ENTITY_DETECTOR,
     }
 
@@ -237,8 +237,8 @@ public class MemoryTracker {
     }
 
     /**
-     * In case of bugs/race conditions when allocating/releasing memory, sync used bytes
-     * infrequently by recomputing memory usage.
+     * In case of bugs/race conditions or users dyanmically changing dedicated/shared
+     * cache size, sync used bytes infrequently by recomputing memory usage.
      * @param origin Origin
      * @param totalBytes total bytes from recomputing
      * @param reservedBytes reserved bytes from recomputing
@@ -249,6 +249,10 @@ public class MemoryTracker {
         long recordedReservedBytes = reservedMemoryBytesByOrigin.getOrDefault(origin, 0L);
         if (totalBytes == recordedTotalBytes && reservedBytes == recordedReservedBytes) {
             return false;
+        }
+        StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
+        for (StackTraceElement element : stackTrace) {
+            LOG.info(element);
         }
         LOG
             .info(

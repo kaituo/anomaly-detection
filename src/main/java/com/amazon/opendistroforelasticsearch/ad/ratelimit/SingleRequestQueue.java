@@ -29,10 +29,12 @@ import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.threadpool.ThreadPool;
 
+import com.amazon.opendistroforelasticsearch.ad.NodeStateManager;
 import com.amazon.opendistroforelasticsearch.ad.breaker.ADCircuitBreakerService;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 
 public abstract class SingleRequestQueue<RequestType extends QueuedRequest> extends ConcurrentQueue<RequestType> {
+    private static final Logger LOG = LogManager.getLogger(SingleRequestQueue.class);
 
     public SingleRequestQueue(
         String queueName,
@@ -52,7 +54,8 @@ public abstract class SingleRequestQueue<RequestType extends QueuedRequest> exte
         ClientUtil clientUtil,
         Setting<Integer> concurrencySetting,
         Duration executionTtl,
-        Duration stateTtl
+        Duration stateTtl,
+        NodeStateManager nodeStateManager
     ) {
         super(
             queueName,
@@ -72,40 +75,34 @@ public abstract class SingleRequestQueue<RequestType extends QueuedRequest> exte
             clientUtil,
             concurrencySetting,
             executionTtl,
-            stateTtl
+            stateTtl,
+            nodeStateManager
         );
     }
-
-    private static final Logger LOG = LogManager.getLogger(RateLimitedQueue.class);
 
     @Override
     protected void execute(Runnable afterProcessCallback, Runnable emptyQueueCallback) {
         RequestType request = null;
 
-        try {
-            Optional<BlockingQueue<RequestType>> queueOptional = selectNextQueue();
-            if (false == queueOptional.isPresent()) {
-                // no queue has requests
-                emptyQueueCallback.run();
-                return;
-            }
-
-            BlockingQueue<RequestType> queue = queueOptional.get();
-            if (false == queue.isEmpty()) {
-                request = queue.poll();
-            }
-
-            if (request == null) {
-                emptyQueueCallback.run();
-                return;
-            }
-
-            final ActionListener<Void> handlerWithRelease = ActionListener.wrap(afterProcessCallback);
-            executeRequest(request, handlerWithRelease);
-        } catch (Exception e) {
-            LOG.error("Fail to execute", e);
+        Optional<BlockingQueue<RequestType>> queueOptional = selectNextQueue();
+        if (false == queueOptional.isPresent()) {
+            // no queue has requests
             emptyQueueCallback.run();
+            return;
         }
+
+        BlockingQueue<RequestType> queue = queueOptional.get();
+        if (false == queue.isEmpty()) {
+            request = queue.poll();
+        }
+
+        if (request == null) {
+            emptyQueueCallback.run();
+            return;
+        }
+
+        final ActionListener<Void> handlerWithRelease = ActionListener.wrap(afterProcessCallback);
+        executeRequest(request, handlerWithRelease);
     }
 
     /**

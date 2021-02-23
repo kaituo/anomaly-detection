@@ -18,7 +18,6 @@ package com.amazon.opendistroforelasticsearch.ad.transport;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -62,7 +61,7 @@ import com.amazon.opendistroforelasticsearch.ad.ratelimit.EntityFeatureRequest;
 import com.amazon.opendistroforelasticsearch.ad.ratelimit.ResultWriteQueue;
 import com.amazon.opendistroforelasticsearch.ad.ratelimit.ResultWriteRequest;
 import com.amazon.opendistroforelasticsearch.ad.ratelimit.SegmentPriority;
-import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
+import com.amazon.opendistroforelasticsearch.ad.util.ExceptionUtil;
 import com.amazon.opendistroforelasticsearch.ad.util.ParseUtils;
 
 public class EntityResultTransportAction extends HandledTransportAction<EntityResultRequest, AcknowledgedResponse> {
@@ -119,19 +118,20 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
         try {
             String detectorId = request.getDetectorId();
 
-            Optional<AnomalyDetectionException> previousException = stateManager.fetchColdStartException(detectorId);
+            Optional<AnomalyDetectionException> previousException = stateManager.fetchExceptionAndClear(detectorId);
 
             if (previousException.isPresent()) {
                 Exception exception = previousException.get();
                 LOG.error("Previous exception of {}: {}", detectorId, exception);
                 if (exception instanceof EndRunException) {
-                    listener.onFailure(exception);
                     EndRunException endRunException = (EndRunException) exception;
                     if (endRunException.isEndNow()) {
-                        // don't bother to continue any more
+                        listener.onFailure(exception);
                         return;
                     }
                 }
+
+                listener = ExceptionUtil.wrapListener(listener, exception, detectorId);
             }
 
             stateManager.getAnomalyDetector(detectorId, onGetDetector(listener, detectorId, request, previousException));
@@ -139,7 +139,6 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
             LOG.error("fail to get entity's anomaly grade", exception);
             listener.onFailure(exception);
         }
-
     }
 
     private ActionListener<Optional<AnomalyDetector>> onGetDetector(
@@ -155,51 +154,32 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
             }
 
             AnomalyDetector detector = detectorOptional.get();
-            // we only support 1 categorical field now
-            String categoricalField = detector.getCategoryField().get(0);
+
+            if (request.getEntities() == null) {
+                listener.onResponse(null);
+                return;
+            }
 
             Instant executionStartTime = Instant.now();
-            Map<String, EntityFeatureRequest> cacheMissEntities = new HashMap<>();
-            for (Entry<String, double[]> entity : request.getEntities().entrySet()) {
-                String entityName = entity.getKey();
-                // For ES, the limit of the document ID is 512 bytes.
-                // skip an entity if the entity's name is more than 256 characters
-                // since we are using it as part of document id.
-                if (entityName.length() > AnomalyDetectorSettings.MAX_ENTITY_LENGTH) {
+            // Map<String, EntityFeatureRequest> cacheMissEntities = new HashMap<>();
+            Map<Entity, double[]> cacheMissEntities = new HashMap<>();
+            for (Entry<Entity, double[]> entityEntry : request.getEntities().entrySet()) {
+                Entity categoricalValues = entityEntry.getKey();
+
+                Optional<String> modelIdOptional = categoricalValues.getModelId(detectorId);
+                if (false == modelIdOptional.isPresent()) {
                     continue;
                 }
 
-                double[] datapoint = entity.getValue();
-                String modelId = modelManager.getEntityModelId(detectorId, entityName);
+                String modelId = modelIdOptional.get();
+                double[] datapoint = entityEntry.getValue();
                 ModelState<EntityModel> entityModel = cache.get().get(modelId, detector);
                 if (entityModel == null) {
                     // cache miss
-                    cacheMissEntities
-                        .put(
-                            modelId,
-                            new EntityFeatureRequest(
-                                System.currentTimeMillis() + detector.getDetectorIntervalInMilliseconds(),
-                                detectorId,
-                                // will change once we know the anomaly grade. Set it to low since most of the entities should not count as
-                                // hot
-                                // entities if the traffic is not totally random
-                                SegmentPriority.LOW,
-                                entityName,
-                                modelId,
-                                datapoint,
-                                request.getStart()
-                            )
-                        );
+                    cacheMissEntities.put(entityEntry.getKey(), entityEntry.getValue());
                     continue;
                 }
-                ThresholdingResult result = getAnomalyResultForEntity(
-                    datapoint,
-                    entityName,
-                    entityModel,
-                    modelId,
-                    detector,
-                    request.getStart()
-                );
+                ThresholdingResult result = getAnomalyResultForEntity(datapoint, entityModel, modelId, detector, categoricalValues);
                 // result.getRcfScore() = 0 means the model is not initialized
                 // result.getGrade() = 0 means it is not an anomaly
                 // So many EsRejectedExecutionException if we write no matter what
@@ -221,7 +201,7 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
                                     executionStartTime,
                                     Instant.now(),
                                     null,
-                                    Arrays.asList(new Entity(categoricalField, entityName)),
+                                    categoricalValues,
                                     detector.getUser(),
                                     indexUtil.getSchemaVersion(ADIndex.RESULT)
                                 )
@@ -231,30 +211,53 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
             }
 
             // split hot and cold entities
-            Pair<List<String>, List<String>> hotColdEntities = cache
+            Pair<List<Entity>, List<Entity>> hotColdEntities = cache
                 .get()
                 .selectUpdateCandidate(cacheMissEntities.keySet(), detectorId, detector);
 
             List<EntityFeatureRequest> hotEntityRequests = new ArrayList<>();
             List<EntityFeatureRequest> coldEntityRequests = new ArrayList<>();
 
-            for (String hotEntityModelId : hotColdEntities.getLeft()) {
-                EntityFeatureRequest hotEntityRequest = cacheMissEntities.get(hotEntityModelId);
-                if (hotEntityRequest == null) {
-                    LOG.error(new ParameterizedMessage("[{}]'s feature request should not be null", hotEntityModelId));
+            for (Entity hotEntity : hotColdEntities.getLeft()) {
+                double[] hotEntityValue = cacheMissEntities.get(hotEntity);
+                if (hotEntityValue == null) {
+                    LOG.error(new ParameterizedMessage("feature value should not be null: [{}]", hotEntity));
                     continue;
                 }
-                hotEntityRequest.setPriority(SegmentPriority.MEDIUM);
-                hotEntityRequests.add(hotEntityRequest);
+                hotEntityRequests
+                    .add(
+                        new EntityFeatureRequest(
+                            System.currentTimeMillis() + detector.getDetectorIntervalInMilliseconds(),
+                            detectorId,
+                            // will change once we know the anomaly grade. Set it to low since most of the entities should not count as
+                            // hot entities if the traffic is not totally random
+                            SegmentPriority.MEDIUM,
+                            hotEntity,
+                            hotEntityValue,
+                            request.getStart()
+                        )
+                    );
             }
 
-            for (String coldEntityModelId : hotColdEntities.getRight()) {
-                EntityFeatureRequest coldEntityRequest = cacheMissEntities.get(coldEntityModelId);
-                if (coldEntityRequest == null) {
-                    LOG.error(new ParameterizedMessage("[{}]'s feature request should not be null", coldEntityModelId));
+            for (Entity coldEntity : hotColdEntities.getRight()) {
+                double[] coldEntityValue = cacheMissEntities.get(coldEntity);
+                if (coldEntityValue == null) {
+                    LOG.error(new ParameterizedMessage("feature value should not be null: [{}]", coldEntity));
                     continue;
                 }
-                coldEntityRequests.add(coldEntityRequest);
+                coldEntityRequests
+                    .add(
+                        new EntityFeatureRequest(
+                            System.currentTimeMillis() + detector.getDetectorIntervalInMilliseconds(),
+                            detectorId,
+                            // will change once we know the anomaly grade. Set it to low since most of the entities should not count as
+                            // hot entities if the traffic is not totally random
+                            SegmentPriority.LOW,
+                            coldEntity,
+                            coldEntityValue,
+                            request.getStart()
+                        )
+                    );
             }
 
             checkpointReadQueue.putAll(hotEntityRequests);
@@ -284,7 +287,6 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
     /**
      * Compute anomaly result for the given data point
      * @param datapoint Data point
-     * @param entityName entity's name like "server_1"
      * @param modelState the state associated with the entity
      * @param modelId the model Id
      * @param detector Detector accessor
@@ -292,17 +294,16 @@ public class EntityResultTransportAction extends HandledTransportAction<EntityRe
      */
     ThresholdingResult getAnomalyResultForEntity(
         double[] datapoint,
-        String entityName,
         ModelState<EntityModel> modelState,
         String modelId,
         AnomalyDetector detector,
-        long dataStartTime
+        Entity entity
     ) {
         if (modelState != null) {
             EntityModel entityModel = modelState.getModel();
 
             if (entityModel == null) {
-                entityModel = new EntityModel(modelId, new ArrayDeque<>(), null, null);
+                entityModel = new EntityModel(entity, new ArrayDeque<>(), null, null);
                 modelState.setModel(entityModel);
             }
 

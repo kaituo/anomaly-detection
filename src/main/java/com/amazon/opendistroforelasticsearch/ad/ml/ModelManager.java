@@ -142,6 +142,7 @@ public class ModelManager implements DetectorModelSize {
      * @param modelPartitioner Used to partition RCF models
      * @param featureManager Used to create features for models
      * @param memoryTracker AD memory usage tracker
+     * @param entityColdStarter HCAD cold start utility
      */
     public ModelManager(
         RandomCutForestSerDe rcfSerde,
@@ -941,6 +942,17 @@ public class ModelManager implements DetectorModelSize {
             return new ThresholdingResult(0, 0, 0);
         }
 
+        // clear feature not scored yet
+        Queue<double[]> samples = model.getSamples();
+        if (samples != null) {
+            while (false == samples.isEmpty()) {
+                double[] recordedFeature = samples.poll();
+                double rcfScore = rcf.getAnomalyScore(recordedFeature);
+                rcf.update(recordedFeature);
+                threshold.update(rcfScore);
+            }
+        }
+
         double rcfScore = rcf.getAnomalyScore(feature);
         rcf.update(feature);
         threshold.update(rcfScore);
@@ -954,20 +966,8 @@ public class ModelManager implements DetectorModelSize {
     }
 
     /**
-     * Create model Id out of detector Id and entity name
-     * @param detectorId Detector Id
-     * @param entityValue Entity's value
-     * @return The model Id
-     */
-    public String getEntityModelId(String detectorId, String entityValue) {
-        return detectorId + "_entity_" + entityValue;
-    }
-
-    /**
      * Instantiate an entity state out of checkpoint.
      * @param checkpoint Checkpoint loaded from index
-     * @param modelId Model Id
-     * @param entityName Entity's name
      * @param modelState entity state to instantiate
      *
      * @return updated model state
@@ -975,8 +975,6 @@ public class ModelManager implements DetectorModelSize {
      */
     public ModelState<EntityModel> processEntityCheckpoint(
         Optional<Entry<EntityModel, Instant>> checkpoint,
-        String modelId,
-        String entityName,
         ModelState<EntityModel> modelState
     ) {
         if (checkpoint.isPresent()) {
@@ -988,13 +986,13 @@ public class ModelManager implements DetectorModelSize {
         }
         EntityModel model = modelState.getModel();
         if (model == null) {
-            model = new EntityModel(modelId, new ArrayDeque<>(), null, null);
+            model = new EntityModel(null, new ArrayDeque<>(), null, null);
             modelState.setModel(model);
         }
 
         if ((model.getRcf() == null || model.getThreshold() == null)
             && model.getSamples() != null
-            && model.getSamples().size() > rcfNumMinSamples) {
+            && model.getSamples().size() >= rcfNumMinSamples) {
             entityColdStarter.trainModelFromExistingSamples(modelState);
         }
         return modelState;

@@ -20,13 +20,11 @@ import static org.hamcrest.Matchers.hasItem;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
+import java.util.Locale;
 
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionRequestValidationException;
@@ -38,7 +36,6 @@ import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamInput;
-import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.IndexingPressure;
 import org.elasticsearch.transport.TransportService;
@@ -75,22 +72,14 @@ public class ADResultBulkTransportActionTests extends AbstractADTest {
         Settings settings = Settings
             .builder()
             .put(IndexingPressure.MAX_INDEXING_BYTES.getKey(), "1KB")
-            .put(AnomalyDetectorSettings.INDEX_PRESSURE_SOFT_LIMIT.getKey(), 0.6)
-            .put(AnomalyDetectorSettings.INDEX_PRESSURE_HARD_LIMIT.getKey(), 0.9)
+            .put(AnomalyDetectorSettings.INDEX_PRESSURE_SOFT_LIMIT.getKey(), 0.8)
             .build();
-        setupTestNodes(settings);
+
+        // without register these settings, the constructor of ADResultBulkTransportAction cannot invoke update consumer
+        setupTestNodes(AnomalyDetectorSettings.INDEX_PRESSURE_SOFT_LIMIT, AnomalyDetectorSettings.INDEX_PRESSURE_HARD_LIMIT);
         transportService = testNodes[0].transportService;
-        clusterService = spy(testNodes[0].clusterService);
-        ClusterSettings clusterSettings = new ClusterSettings(
-            settings,
-            Collections
-                .unmodifiableSet(
-                    new HashSet<>(
-                        Arrays.asList(AnomalyDetectorSettings.INDEX_PRESSURE_SOFT_LIMIT, AnomalyDetectorSettings.INDEX_PRESSURE_HARD_LIMIT)
-                    )
-                )
-        );
-        when(clusterService.getClusterSettings()).thenReturn(clusterSettings);
+        clusterService = testNodes[0].clusterService;
+
         ActionFilters actionFilters = mock(ActionFilters.class);
         indexingPressure = mock(IndexingPressure.class);
 
@@ -190,7 +179,7 @@ public class ADResultBulkTransportActionTests extends AbstractADTest {
             int size = request.requests().size();
             assertTrue(1 < size);
             // at least 1 half should be removed
-            assertTrue(String.format("size is actually %d", size), size < 500);
+            assertTrue(String.format(Locale.ROOT, "size is actually %d", size), size < 500);
             listener.onResponse(null);
             return null;
         }).when(client).execute(any(), any(), any());

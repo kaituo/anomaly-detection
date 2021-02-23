@@ -46,7 +46,7 @@ import test.com.amazon.opendistroforelasticsearch.ad.util.JsonDeserializer;
 
 import com.amazon.opendistroforelasticsearch.ad.common.exception.JsonPathNotFoundException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.ThresholdingResult;
 
@@ -123,12 +123,8 @@ public class ThresholdResultTests extends ESTestCase {
         response.toXContent(builder, ToXContent.EMPTY_PARAMS);
 
         String json = Strings.toString(builder);
-        assertEquals(
-            JsonDeserializer.getDoubleValue(json, CommonMessageAttributes.ANOMALY_GRADE_JSON_KEY),
-            response.getAnomalyGrade(),
-            0.001
-        );
-        assertEquals(JsonDeserializer.getDoubleValue(json, CommonMessageAttributes.CONFIDENCE_JSON_KEY), response.getConfidence(), 0.001);
+        assertEquals(JsonDeserializer.getDoubleValue(json, CommonName.ANOMALY_GRADE_JSON_KEY), response.getAnomalyGrade(), 0.001);
+        assertEquals(JsonDeserializer.getDoubleValue(json, CommonName.CONFIDENCE_JSON_KEY), response.getConfidence(), 0.001);
     }
 
     public void testEmptyID() {
@@ -153,7 +149,7 @@ public class ThresholdResultTests extends ESTestCase {
         request.toXContent(builder, ToXContent.EMPTY_PARAMS);
 
         String json = Strings.toString(builder);
-        assertEquals(JsonDeserializer.getTextValue(json, CommonMessageAttributes.ID_JSON_KEY), request.getAdID());
-        assertEquals(JsonDeserializer.getDoubleValue(json, CommonMessageAttributes.RCF_SCORE_JSON_KEY), request.getRCFScore(), 0.001);
+        assertEquals(JsonDeserializer.getTextValue(json, CommonName.ID_JSON_KEY), request.getAdID());
+        assertEquals(JsonDeserializer.getDoubleValue(json, CommonName.RCF_SCORE_JSON_KEY), request.getRCFScore(), 0.001);
     }
 }

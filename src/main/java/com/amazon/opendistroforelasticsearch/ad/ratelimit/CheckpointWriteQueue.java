@@ -36,6 +36,7 @@ import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.ResourceAlreadyExistsException;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.bulk.BulkAction;
+import org.elasticsearch.action.bulk.BulkItemResponse;
 import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.action.index.IndexRequest;
@@ -62,7 +63,6 @@ public class CheckpointWriteQueue extends BatchQueue<CheckpointWriteRequest, Bul
     private final CheckpointDao checkpoint;
     private final String indexName;
     private final Duration checkpointInterval;
-    private final NodeStateManager stateManager;
 
     public CheckpointWriteQueue(
         long heapSizeInBytes,
@@ -106,13 +106,13 @@ public class CheckpointWriteQueue extends BatchQueue<CheckpointWriteRequest, Bul
             CHECKPOINT_WRITE_QUEUE_CONCURRENCY,
             executionTtl,
             CHECKPOINT_WRITE_QUEUE_BATCH_SIZE,
-            stateTtl
+            stateTtl,
+            stateManager
         );
         this.indexUtil = indexUtil;
         this.checkpoint = checkpoint;
         this.indexName = indexName;
         this.checkpointInterval = checkpointInterval;
-        this.stateManager = stateManager;
     }
 
     @Override
@@ -132,6 +132,7 @@ public class CheckpointWriteQueue extends BatchQueue<CheckpointWriteRequest, Bul
                     clientUtil.<BulkRequest, BulkResponse>execute(BulkAction.INSTANCE, request, listener);
                 } else {
                     LOG.error(String.format(Locale.ROOT, "Unexpected error creating checkpoint index"), exception);
+                    listener.onFailure(exception);
                 }
             }));
         }
@@ -141,10 +142,6 @@ public class CheckpointWriteQueue extends BatchQueue<CheckpointWriteRequest, Bul
     protected BulkRequest toBatchRequest(List<CheckpointWriteRequest> toProcess) {
         final BulkRequest bulkRequest = new BulkRequest();
         for (CheckpointWriteRequest request : toProcess) {
-
-            bulkRequest.add(request.getIndexRequest());
-
-            // retrying request
             bulkRequest.add(request.getIndexRequest());
         }
         return bulkRequest;
@@ -152,24 +149,29 @@ public class CheckpointWriteQueue extends BatchQueue<CheckpointWriteRequest, Bul
 
     @Override
     protected ActionListener<BulkResponse> getResponseListener(List<CheckpointWriteRequest> toProcess, BulkRequest batchRequest) {
-        return ActionListener
-            .wrap(
-                response -> {
+        return ActionListener.wrap(response -> {
+            for (BulkItemResponse r : response.getItems()) {
+                if (r.getFailureMessage() != null) {
+                    // maybe indicating a bug
                     // don't retry failed requests since checkpoints are too large (250KB+)
                     // Later maintenance window or cold start will retry saving
-                    LOG.debug("Finished writing checkpoints");
-                },
-                exception -> {
-                    if (ExceptionUtil.isOverloaded(exception)) {
-                        LOG.error("too many get AD model checkpoint requests or shard not avialble");
-                        setCoolDownStart();
-                    }
-
-                    // don't retry failed requests since checkpoints are too large (250KB+)
-                    // Later maintenance window or cold start will retry saving
-                    LOG.error("Fail to save models", exception);
+                    LOG.error(r.getFailureMessage());
                 }
-            );
+            }
+        }, exception -> {
+            if (ExceptionUtil.isOverloaded(exception)) {
+                LOG.error("too many get AD model checkpoint requests or shard not avialble");
+                setCoolDownStart();
+            }
+
+            for (CheckpointWriteRequest request : toProcess) {
+                nodeStateManager.setException(request.getDetectorId(), exception);
+            }
+
+            // don't retry failed requests since checkpoints are too large (250KB+)
+            // Later maintenance window or cold start will retry saving
+            LOG.error("Fail to save models", exception);
+        });
     }
 
     /**
@@ -180,6 +182,7 @@ public class CheckpointWriteQueue extends BatchQueue<CheckpointWriteRequest, Bul
      *  next batch).
      * @param modelState Model state
      * @param forceWrite whether we should write no matter what
+     * @param priority how urgent the write is
      */
     public void write(ModelState<EntityModel> modelState, boolean forceWrite, SegmentPriority priority) {
         Instant instant = modelState.getLastCheckpointTime();
@@ -197,7 +200,7 @@ public class CheckpointWriteQueue extends BatchQueue<CheckpointWriteRequest, Bul
                     return;
                 }
 
-                stateManager.getAnomalyDetector(detectorId, onGetDetector(detectorId, modelId, modelState, priority));
+                nodeStateManager.getAnomalyDetector(detectorId, onGetDetector(detectorId, modelId, modelState, priority));
             } catch (ConcurrentModificationException e) {
                 LOG.info(new ParameterizedMessage("Concurrent modification while serializing models for [{}]", modelState), e);
             }
@@ -298,6 +301,6 @@ public class CheckpointWriteQueue extends BatchQueue<CheckpointWriteRequest, Bul
 
         }, exception -> { LOG.error(new ParameterizedMessage("fail to get detector [{}]", detectorId), exception); });
 
-        stateManager.getAnomalyDetector(detectorId, onGetForAll);
+        nodeStateManager.getAnomalyDetector(detectorId, onGetForAll);
     }
 }

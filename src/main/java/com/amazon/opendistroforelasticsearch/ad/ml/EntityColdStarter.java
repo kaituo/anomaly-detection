@@ -54,6 +54,7 @@ import com.amazon.opendistroforelasticsearch.ad.dataprocessor.Interpolator;
 import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
 import com.amazon.opendistroforelasticsearch.ad.feature.SearchFeatureDao;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.model.IntervalTimeConfiguration;
 import com.amazon.opendistroforelasticsearch.ad.ratelimit.CheckpointWriteQueue;
 import com.amazon.opendistroforelasticsearch.ad.ratelimit.SegmentPriority;
@@ -174,7 +175,7 @@ public class EntityColdStarter implements MaintenanceState {
 
     private ActionListener<Optional<AnomalyDetector>> onGetDetector(
         String modelId,
-        String entityName,
+        Entity entity,
         String detectorId,
         ModelState<EntityModel> modelState,
         ActionListener<Void> listener
@@ -218,7 +219,7 @@ public class EntityColdStarter implements MaintenanceState {
                             if (hasEnoughSample(dataPoints, modelState) == false) {
                                 combineTrainSamples(dataPoints, modelId, modelState);
                             } else {
-                                trainModelFromDataSegments(dataPoints, modelId, modelState);
+                                trainModelFromDataSegments(dataPoints, entity, modelState);
                             }
                             logger.info("Succeeded in training entity: {}", modelId);
                         } else {
@@ -237,9 +238,9 @@ public class EntityColdStarter implements MaintenanceState {
                             lastThrottledColdStartTime = Instant.now();
                         } else if (cause instanceof AnomalyDetectionException || exception instanceof AnomalyDetectionException) {
                             // e.g., cannot find anomaly detector
-                            nodeStateManager.setLastColdStartException(detectorId, (AnomalyDetectionException) exception);
+                            nodeStateManager.setException(detectorId, exception);
                         } else {
-                            nodeStateManager.setLastColdStartException(detectorId, new AnomalyDetectionException(detectorId, cause));
+                            nodeStateManager.setException(detectorId, new AnomalyDetectionException(detectorId, cause));
                         }
                     } finally {
                         listener.onFailure(exception);
@@ -251,7 +252,7 @@ public class EntityColdStarter implements MaintenanceState {
                     .execute(
                         () -> getEntityColdStartData(
                             detectorId,
-                            entityName,
+                            entity,
                             shingleSize,
                             new ThreadedActionListener<>(
                                 logger,
@@ -278,14 +279,14 @@ public class EntityColdStarter implements MaintenanceState {
     /**
      * Training model for an entity
      * @param modelId model Id corresponding to the entity
-     * @param entityName the entity's name
+     * @param entity the entity's information
      * @param detectorId the detector Id corresponding to the entity
      * @param modelState model state associated with the entity
      * @param listener call back to call after cold start
      */
     private void coldStart(
         String modelId,
-        String entityName,
+        Entity entity,
         String detectorId,
         ModelState<EntityModel> modelState,
         ActionListener<Void> listener
@@ -297,17 +298,17 @@ public class EntityColdStarter implements MaintenanceState {
             return;
         }
 
-        nodeStateManager.getAnomalyDetector(detectorId, onGetDetector(modelId, entityName, detectorId, modelState, listener));
+        nodeStateManager.getAnomalyDetector(detectorId, onGetDetector(modelId, entity, detectorId, modelState, listener));
     }
 
     /**
      * Train model using given data points.
      *
      * @param dataPoints List of continuous data points, in ascending order of timestamps
-     * @param modelId The model Id
+     * @param entity Entity instance
      * @param entityState Entity state associated with the model Id
      */
-    private void trainModelFromDataSegments(List<double[][]> dataPoints, String modelId, ModelState<EntityModel> entityState) {
+    private void trainModelFromDataSegments(List<double[][]> dataPoints, Entity entity, ModelState<EntityModel> entityState) {
         if (dataPoints == null || dataPoints.size() == 0 || dataPoints.get(0) == null || dataPoints.get(0).length == 0) {
             throw new IllegalArgumentException("Data points must not be empty.");
         }
@@ -326,14 +327,14 @@ public class EntityColdStarter implements MaintenanceState {
         int totalLength = 0;
         // get continuous data points and send for training
         for (double[][] continuousDataPoints : dataPoints) {
-            double[] scores = trainRCFModel(continuousDataPoints, modelId, rcf);
+            double[] scores = trainRCFModel(continuousDataPoints, rcf);
             allScores.add(scores);
             totalLength += scores.length;
         }
 
         EntityModel model = entityState.getModel();
         if (model == null) {
-            model = new EntityModel(modelId, new ArrayDeque<>(), null, null);
+            model = new EntityModel(entity, new ArrayDeque<>(), null, null);
         }
         model.setRcf(rcf);
         double[] joinedScores = new double[totalLength];
@@ -365,11 +366,10 @@ public class EntityColdStarter implements MaintenanceState {
     /**
      * Train the RCF model using given data points
      * @param dataPoints Data points
-     * @param modelId The model Id
      * @param rcf RCF model to be trained
      * @return scores returned by RCF models
      */
-    private double[] trainRCFModel(double[][] dataPoints, String modelId, RandomCutForest rcf) {
+    private double[] trainRCFModel(double[][] dataPoints, RandomCutForest rcf) {
         if (dataPoints.length == 0 || dataPoints[0].length == 0) {
             throw new IllegalArgumentException("Data points must not be empty.");
         }
@@ -394,20 +394,19 @@ public class EntityColdStarter implements MaintenanceState {
      * points to shingles. Finally, full shingles will be used for cold start.
      *
      * @param detectorId detector Id
-     * @param entityName entity's name
+     * @param entity the entity's information
      * @param entityShingleSize model's shingle size
      * @param listener listener to return training data
      */
     private void getEntityColdStartData(
         String detectorId,
-        String entityName,
+        Entity entity,
         int entityShingleSize,
         ActionListener<Optional<List<double[][]>>> listener
     ) {
         ActionListener<Optional<AnomalyDetector>> getDetectorListener = ActionListener.wrap(detectorOp -> {
             if (!detectorOp.isPresent()) {
-                nodeStateManager
-                    .setLastColdStartException(detectorId, new EndRunException(detectorId, "AnomalyDetector is not available.", true));
+                nodeStateManager.setException(detectorId, new EndRunException(detectorId, "AnomalyDetector is not available.", true));
                 return;
             }
             List<double[][]> coldStartData = new ArrayList<>();
@@ -472,7 +471,7 @@ public class EntityColdStarter implements MaintenanceState {
                         .getColdStartSamplesForPeriods(
                             detector,
                             sampleRanges,
-                            entityName,
+                            entity,
                             false,
                             new ThreadedActionListener<>(
                                 logger,
@@ -492,7 +491,7 @@ public class EntityColdStarter implements MaintenanceState {
             searchFeatureDao
                 .getEntityMinMaxDataTime(
                     detector,
-                    entityName,
+                    entity,
                     new ThreadedActionListener<>(logger, threadPool, AnomalyDetectorPlugin.AD_THREAD_POOL_NAME, minMaxTimeListener, false)
                 );
 
@@ -536,22 +535,22 @@ public class EntityColdStarter implements MaintenanceState {
 
     /**
      * Train models for the given entity
-     * @param entityName The entity's name
+     * @param entity The entity info
      * @param detectorId Detector Id
      * @param modelState Model state associated with the entity
      * @param listener callback before the method returns
      */
-    public void trainModel(String entityName, String detectorId, ModelState<EntityModel> modelState, ActionListener<Void> listener) {
+    public void trainModel(Entity entity, String detectorId, ModelState<EntityModel> modelState, ActionListener<Void> listener) {
         Queue<double[]> samples = modelState.getModel().getSamples();
         String modelId = modelState.getModelId();
 
         if (samples.size() < this.numMinSamples) {
             // we cannot get last RCF score since cold start happens asynchronously
-            coldStart(modelId, entityName, detectorId, modelState, listener);
+            coldStart(modelId, entity, detectorId, modelState, listener);
         } else {
             try {
                 double[][] trainData = featureManager.batchShingle(samples.toArray(new double[0][0]), this.shingleSize);
-                trainModelFromDataSegments(Collections.singletonList(trainData), modelId, modelState);
+                trainModelFromDataSegments(Collections.singletonList(trainData), entity, modelState);
             } finally {
                 listener.onResponse(null);
             }
@@ -563,11 +562,11 @@ public class EntityColdStarter implements MaintenanceState {
             return;
         }
 
-        Queue<double[]> samples = modelState.getModel().getSamples();
+        EntityModel model = modelState.getModel();
+        Queue<double[]> samples = model.getSamples();
         if (samples.size() >= this.numMinSamples) {
-            String modelId = modelState.getModelId();
             double[][] trainData = featureManager.batchShingle(samples.toArray(new double[0][0]), this.shingleSize);
-            trainModelFromDataSegments(Collections.singletonList(trainData), modelId, modelState);
+            trainModelFromDataSegments(Collections.singletonList(trainData), model.getEntity().orElse(null), modelState);
         }
     }
 
@@ -606,7 +605,7 @@ public class EntityColdStarter implements MaintenanceState {
     private void combineTrainSamples(List<double[][]> coldstartDatapoints, String modelId, ModelState<EntityModel> entityState) {
         EntityModel model = entityState.getModel();
         if (model == null) {
-            model = new EntityModel(modelId, new ArrayDeque<>(), null, null);
+            model = new EntityModel(null, new ArrayDeque<>(), null, null);
         }
         for (double[][] consecutivePoints : coldstartDatapoints) {
             for (int i = 0; i < consecutivePoints.length; i++) {

@@ -78,6 +78,7 @@ import com.amazon.opendistroforelasticsearch.ad.dataprocessor.Interpolator;
 import com.amazon.opendistroforelasticsearch.ad.dataprocessor.LinearUniformInterpolator;
 import com.amazon.opendistroforelasticsearch.ad.dataprocessor.SingleFeatureLinearUniformInterpolator;
 import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
+import com.amazon.opendistroforelasticsearch.ad.feature.ScriptMaker;
 import com.amazon.opendistroforelasticsearch.ad.feature.SearchFeatureDao;
 import com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices;
 import com.amazon.opendistroforelasticsearch.ad.ml.CheckpointDao;
@@ -107,6 +108,7 @@ import com.amazon.opendistroforelasticsearch.ad.rest.RestSearchAnomalyResultActi
 import com.amazon.opendistroforelasticsearch.ad.rest.RestStatsAnomalyDetectorAction;
 import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
 import com.amazon.opendistroforelasticsearch.ad.settings.EnabledSetting;
+import com.amazon.opendistroforelasticsearch.ad.settings.NumericSetting;
 import com.amazon.opendistroforelasticsearch.ad.stats.ADStat;
 import com.amazon.opendistroforelasticsearch.ad.stats.ADStats;
 import com.amazon.opendistroforelasticsearch.ad.stats.StatNames;
@@ -306,6 +308,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         Supplier<RepositoriesService> repositoriesServiceSupplier
     ) {
         EnabledSetting.getInstance().init(clusterService);
+        NumericSetting.getInstance().init(clusterService);
         this.client = client;
         this.threadPool = threadPool;
         Settings settings = environment.settings();
@@ -324,9 +327,9 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             xContentRegistry,
             interpolator,
             clientUtil,
-            threadPool,
             settings,
-            clusterService
+            clusterService,
+            gson
         );
 
         JvmService jvmService = new JvmService(environment.settings());
@@ -397,7 +400,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         CheckpointWriteQueue checkpointWriteQueue = new CheckpointWriteQueue(
             heapSizeBytes,
             AnomalyDetectorSettings.CHECKPOINT_WRITE_QUEUE_SIZE_IN_BYTES,
-            AnomalyDetectorSettings.BIG_REQUEST_QUEUE_MAX_HEAP_PERCENT,
+            AnomalyDetectorSettings.CHECKPOINT_WRITE_QUEUE_MAX_HEAP_PERCENT,
             clusterService,
             random,
             adCircuitBreakerService,
@@ -407,7 +410,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             getClock(),
             AnomalyDetectorSettings.MEDIUM_SEGMENT_PRUNE_RATIO,
             AnomalyDetectorSettings.LOW_SEGMENT_PRUNE_RATIO,
-            AnomalyDetectorSettings.QUEUE_MAINTENANCE_FREQ_CONSTANT,
+            AnomalyDetectorSettings.MAINTENANCE_FREQ_CONSTANT,
             clientUtil,
             AnomalyDetectorSettings.QUEUE_MAINTENANCE,
             anomalyDetectionIndices,
@@ -429,7 +432,8 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             clusterService,
             AnomalyDetectorSettings.HOURLY_MAINTENANCE,
             threadPool,
-            checkpointWriteQueue
+            checkpointWriteQueue,
+            AnomalyDetectorSettings.MAINTENANCE_FREQ_CONSTANT
         );
 
         CacheProvider cacheProvider = new CacheProvider(cache);
@@ -462,7 +466,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         EntityColdStartQueue coldstartQueue = new EntityColdStartQueue(
             heapSizeBytes,
             AnomalyDetectorSettings.ENTITY_REQUEST_SIZE_IN_BYTES,
-            AnomalyDetectorSettings.SMALL_REQUEST_QUEUE_MAX_HEAP_PERCENT,
+            AnomalyDetectorSettings.ENTITY_COLD_START_QUEUE_MAX_HEAP_PERCENT,
             clusterService,
             random,
             adCircuitBreakerService,
@@ -472,11 +476,12 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             getClock(),
             AnomalyDetectorSettings.MEDIUM_SEGMENT_PRUNE_RATIO,
             AnomalyDetectorSettings.LOW_SEGMENT_PRUNE_RATIO,
-            AnomalyDetectorSettings.QUEUE_MAINTENANCE_FREQ_CONSTANT,
+            AnomalyDetectorSettings.MAINTENANCE_FREQ_CONSTANT,
             clientUtil,
             AnomalyDetectorSettings.QUEUE_MAINTENANCE,
             entityColdStarter,
-            AnomalyDetectorSettings.HOURLY_MAINTENANCE
+            AnomalyDetectorSettings.HOURLY_MAINTENANCE,
+            stateManager
         );
 
         ModelManager modelManager = new ModelManager(
@@ -517,7 +522,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         ResultWriteQueue resultWriteQueue = new ResultWriteQueue(
             heapSizeBytes,
             AnomalyDetectorSettings.RESULT_WRITE_QUEUE_SIZE_IN_BYTES,
-            AnomalyDetectorSettings.BIG_REQUEST_QUEUE_MAX_HEAP_PERCENT,
+            AnomalyDetectorSettings.RESULT_WRITE_QUEUE_MAX_HEAP_PERCENT,
             clusterService,
             random,
             adCircuitBreakerService,
@@ -527,7 +532,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             getClock(),
             AnomalyDetectorSettings.MEDIUM_SEGMENT_PRUNE_RATIO,
             AnomalyDetectorSettings.LOW_SEGMENT_PRUNE_RATIO,
-            AnomalyDetectorSettings.QUEUE_MAINTENANCE_FREQ_CONSTANT,
+            AnomalyDetectorSettings.MAINTENANCE_FREQ_CONSTANT,
             clientUtil,
             AnomalyDetectorSettings.QUEUE_MAINTENANCE,
             multiEntityResultHandler,
@@ -539,7 +544,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         CheckpointReadQueue checkpointReadQueue = new CheckpointReadQueue(
             heapSizeBytes,
             AnomalyDetectorSettings.ENTITY_FEATURE_REQUEST_SIZE_IN_BYTES,
-            AnomalyDetectorSettings.SMALL_REQUEST_QUEUE_MAX_HEAP_PERCENT,
+            AnomalyDetectorSettings.CHECKPOINT_READ_QUEUE_MAX_HEAP_PERCENT,
             clusterService,
             random,
             adCircuitBreakerService,
@@ -549,7 +554,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             getClock(),
             AnomalyDetectorSettings.MEDIUM_SEGMENT_PRUNE_RATIO,
             AnomalyDetectorSettings.LOW_SEGMENT_PRUNE_RATIO,
-            AnomalyDetectorSettings.QUEUE_MAINTENANCE_FREQ_CONSTANT,
+            AnomalyDetectorSettings.MAINTENANCE_FREQ_CONSTANT,
             clientUtil,
             AnomalyDetectorSettings.QUEUE_MAINTENANCE,
             modelManager,
@@ -567,7 +572,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
         ColdEntityQueue coldEntityQueue = new ColdEntityQueue(
             heapSizeBytes,
             AnomalyDetectorSettings.ENTITY_FEATURE_REQUEST_SIZE_IN_BYTES,
-            AnomalyDetectorSettings.SMALL_REQUEST_QUEUE_MAX_HEAP_PERCENT,
+            AnomalyDetectorSettings.COLD_ENTITY_QUEUE_MAX_HEAP_PERCENT,
             clusterService,
             random,
             adCircuitBreakerService,
@@ -577,10 +582,11 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
             getClock(),
             AnomalyDetectorSettings.MEDIUM_SEGMENT_PRUNE_RATIO,
             AnomalyDetectorSettings.LOW_SEGMENT_PRUNE_RATIO,
-            AnomalyDetectorSettings.QUEUE_MAINTENANCE_FREQ_CONSTANT,
+            AnomalyDetectorSettings.MAINTENANCE_FREQ_CONSTANT,
             AnomalyDetectorSettings.CHECKPOINT_READ_QUEUE_BATCH_SIZE.get(settings),
             checkpointReadQueue,
             AnomalyDetectorSettings.HOURLY_MAINTENANCE,
+            stateManager,
             AnomalyDetectorSettings.EXPECTED_COLD_ENTITY_EXECUTION_TIME_IN_SECS.get(settings)
         );
 
@@ -711,7 +717,8 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 checkpointReadQueue,
                 checkpointWriteQueue,
                 coldEntityQueue,
-                entityColdStarter
+                entityColdStarter,
+                new ScriptMaker()
             );
     }
 
@@ -749,6 +756,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
     @Override
     public List<Setting<?>> getSettings() {
         List<Setting<?>> enabledSetting = EnabledSetting.getInstance().getSettings();
+        List<Setting<?>> numericSetting = NumericSetting.getInstance().getSettings();
 
         List<Setting<?>> systemSetting = ImmutableList
             .of(
@@ -759,7 +767,7 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 AnomalyDetectorSettings.DETECTION_INTERVAL,
                 AnomalyDetectorSettings.DETECTION_WINDOW_DELAY,
                 AnomalyDetectorSettings.AD_RESULT_HISTORY_ROLLOVER_PERIOD,
-                AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS,
+                AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS_PER_SHARD,
                 AnomalyDetectorSettings.MAX_RETRY_FOR_UNRESPONSIVE_NODE,
                 AnomalyDetectorSettings.COOLDOWN_MINUTES,
                 AnomalyDetectorSettings.BACKOFF_MINUTES,
@@ -767,7 +775,6 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 AnomalyDetectorSettings.MAX_RETRY_FOR_BACKOFF,
                 AnomalyDetectorSettings.AD_RESULT_HISTORY_RETENTION_PERIOD,
                 AnomalyDetectorSettings.MODEL_MAX_SIZE_PERCENTAGE,
-                AnomalyDetectorSettings.MAX_ENTITIES_PER_QUERY,
                 AnomalyDetectorSettings.MAX_ENTITIES_FOR_PREVIEW,
                 AnomalyDetectorSettings.INDEX_PRESSURE_SOFT_LIMIT,
                 AnomalyDetectorSettings.INDEX_PRESSURE_HARD_LIMIT,
@@ -786,11 +793,22 @@ public class AnomalyDetectorPlugin extends Plugin implements ActionPlugin, Scrip
                 AnomalyDetectorSettings.RESULT_WRITE_QUEUE_BATCH_SIZE,
                 AnomalyDetectorSettings.COLD_ENTITY_QUEUE_CONCURRENCY,
                 AnomalyDetectorSettings.DEDICATED_CACHE_SIZE,
-                AnomalyDetectorSettings.SMALL_REQUEST_QUEUE_MAX_HEAP_PERCENT,
-                AnomalyDetectorSettings.BIG_REQUEST_QUEUE_MAX_HEAP_PERCENT,
-                AnomalyDetectorSettings.EXPECTED_COLD_ENTITY_EXECUTION_TIME_IN_SECS
+                AnomalyDetectorSettings.COLD_ENTITY_QUEUE_MAX_HEAP_PERCENT,
+                AnomalyDetectorSettings.CHECKPOINT_READ_QUEUE_MAX_HEAP_PERCENT,
+                AnomalyDetectorSettings.CHECKPOINT_WRITE_QUEUE_MAX_HEAP_PERCENT,
+                AnomalyDetectorSettings.RESULT_WRITE_QUEUE_MAX_HEAP_PERCENT,
+                AnomalyDetectorSettings.ENTITY_COLD_START_QUEUE_MAX_HEAP_PERCENT,
+                AnomalyDetectorSettings.EXPECTED_COLD_ENTITY_EXECUTION_TIME_IN_SECS,
+                AnomalyDetectorSettings.MAX_ENTITIES_PER_INTERVAL,
+                AnomalyDetectorSettings.PAGE_SIZE
             );
-        return unmodifiableList(Stream.concat(enabledSetting.stream(), systemSetting.stream()).collect(Collectors.toList()));
+        return unmodifiableList(
+            Stream
+                .of(enabledSetting.stream(), systemSetting.stream(), numericSetting.stream())
+                .reduce(Stream::concat)
+                .orElseGet(Stream::empty)
+                .collect(Collectors.toList())
+        );
     }
 
     @Override

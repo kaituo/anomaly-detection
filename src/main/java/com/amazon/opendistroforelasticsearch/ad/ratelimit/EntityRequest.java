@@ -15,27 +15,30 @@
 
 package com.amazon.opendistroforelasticsearch.ad.ratelimit;
 
+import java.util.Optional;
+
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
+
 public class EntityRequest extends QueuedRequest {
-    private final String entityName;
-    private final String modelId;
+    private final Entity entity;
 
     /**
      *
      * @param expirationEpochMs Expiry time of the request
-     * @param entityName Entity name
-     * @param modelId Model Id
+     * @param detectorId Detector Id
+     * @param priority the entity's priority
+     * @param entity the entity's attributes
      */
-    public EntityRequest(long expirationEpochMs, String detectorId, SegmentPriority priority, String entityName, String modelId) {
+    public EntityRequest(long expirationEpochMs, String detectorId, SegmentPriority priority, Entity entity) {
         super(expirationEpochMs, detectorId, priority);
-        this.entityName = entityName;
-        this.modelId = modelId;
+        this.entity = entity;
     }
 
-    public String getEntityName() {
-        return entityName;
+    public Entity getEntity() {
+        return entity;
     }
 
-    public String getModelId() {
-        return modelId;
+    public Optional<String> getModelId() {
+        return entity.getModelId(detectorId);
     }
 }

@@ -28,7 +28,7 @@ import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 
 public class RCFResultRequest extends ActionRequest implements ToXContentObject {
     private String adID;
@@ -97,9 +97,9 @@ public class RCFResultRequest extends ActionRequest implements ToXContentObject 
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject();
-        builder.field(CommonMessageAttributes.ID_JSON_KEY, adID);
-        builder.field(CommonMessageAttributes.MODEL_ID_JSON_KEY, modelID);
-        builder.startArray(CommonMessageAttributes.FEATURE_JSON_KEY);
+        builder.field(CommonName.ID_JSON_KEY, adID);
+        builder.field(CommonName.MODEL_ID_KEY, modelID);
+        builder.startArray(CommonName.FEATURE_JSON_KEY);
         for (double feature : features) {
             builder.value(feature);
         }

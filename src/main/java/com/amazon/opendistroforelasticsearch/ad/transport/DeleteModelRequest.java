@@ -29,7 +29,7 @@ import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 
 /**
  * Request should be sent from the handler logic of transport delete detector API
@@ -74,7 +74,7 @@ public class DeleteModelRequest extends BaseNodesRequest<DeleteModelRequest> imp
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject();
-        builder.field(CommonMessageAttributes.ID_JSON_KEY, adID);
+        builder.field(CommonName.ID_JSON_KEY, adID);
         builder.endObject();
         return builder;
     }

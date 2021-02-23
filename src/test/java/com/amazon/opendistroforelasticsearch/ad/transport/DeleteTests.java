@@ -67,7 +67,7 @@ import test.com.amazon.opendistroforelasticsearch.ad.util.JsonDeserializer;
 import com.amazon.opendistroforelasticsearch.ad.AbstractADTest;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.JsonPathNotFoundException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.util.DiscoveryNodeFilterer;
 
 public class DeleteTests extends AbstractADTest {
@@ -191,7 +191,7 @@ public class DeleteTests extends AbstractADTest {
         request.toXContent(builder, ToXContent.EMPTY_PARAMS);
 
         String json = Strings.toString(builder);
-        assertEquals(JsonDeserializer.getTextValue(json, CommonMessageAttributes.ID_JSON_KEY), requestSupplier.get());
+        assertEquals(JsonDeserializer.getTextValue(json, CommonName.ID_JSON_KEY), requestSupplier.get());
     }
 
     public void testJsonRequestStopDetector() throws IOException, JsonPathNotFoundException {

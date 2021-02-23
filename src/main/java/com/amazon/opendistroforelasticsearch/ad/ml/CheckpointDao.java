@@ -15,6 +15,7 @@
 
 package com.amazon.opendistroforelasticsearch.ad.ml;
 
+import java.io.IOException;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.time.Instant;
@@ -54,6 +55,7 @@ import org.elasticsearch.index.reindex.ScrollableHitSource;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.indices.ADIndex;
 import com.amazon.opendistroforelasticsearch.ad.indices.AnomalyDetectionIndices;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.util.ClientUtil;
 import com.amazon.randomcutforest.RandomCutForest;
 import com.amazon.randomcutforest.serialize.RandomCutForestSerDe;
@@ -214,10 +216,12 @@ public class CheckpointDao {
      * Prepare for index request using the contents of the given model state
      * @param modelState an entity model state
      * @return serialized JSON map or empty map if the state is too bloated
+     * @throws IOException  when serialization fails
      */
-    public Map<String, Object> toIndexSource(ModelState<EntityModel> modelState) {
+    public Map<String, Object> toIndexSource(ModelState<EntityModel> modelState) throws IOException {
         Map<String, Object> source = new HashMap<>();
-        String serializedModel = toCheckpoint(modelState.getModel());
+        EntityModel model = modelState.getModel();
+        String serializedModel = toCheckpoint(model);
         if (serializedModel == null || serializedModel.length() > maxCheckpointBytes) {
             logger
                 .warn(
@@ -234,6 +238,11 @@ public class CheckpointDao {
         source.put(FIELD_MODEL, serializedModel);
         source.put(TIMESTAMP, ZonedDateTime.now(ZoneOffset.UTC));
         source.put(CommonName.SCHEMA_VERSION_FIELD, indexUtil.getSchemaVersion(ADIndex.CHECKPOINT));
+        Optional<Entity> entity = model.getEntity();
+        if (entity.isPresent()) {
+            source.put(CommonName.ENTITY_KEY, entity.get());
+        }
+
         return source;
     }
 
@@ -365,23 +374,35 @@ public class CheckpointDao {
                     return Optional.empty();
                 }
                 JsonObject json = parser.parse(model).getAsJsonObject();
+                // verified, don't need privileged call to get permission
                 ArrayDeque<double[]> samples = new ArrayDeque<>(
                     Arrays.asList(this.gson.fromJson(json.getAsJsonArray(ENTITY_SAMPLE), new double[0][0].getClass()))
                 );
                 RandomCutForest rcf = null;
                 if (json.has(ENTITY_RCF)) {
+                    // verified, don't need privileged call to get permission
                     rcf = rcfSerde.fromJson(json.getAsJsonPrimitive(ENTITY_RCF).getAsString());
                 }
                 ThresholdingModel threshold = null;
                 if (json.has(ENTITY_THRESHOLD)) {
+                    // verified, don't need privileged call to get permission
                     threshold = this.gson.fromJson(json.getAsJsonPrimitive(ENTITY_THRESHOLD).getAsString(), thresholdingModelClass);
                 }
 
                 String lastCheckpointTimeString = (String) (checkpoint.get(TIMESTAMP));
                 Instant timestamp = Instant.parse(lastCheckpointTimeString);
-                return Optional.of(new SimpleImmutableEntry<>(new EntityModel(modelId, samples, rcf, threshold), timestamp));
+                Entity entity = null;
+                Object serializedEntity = checkpoint.get(CommonName.ENTITY_KEY);
+                if (serializedEntity != null) {
+                    try {
+                        entity = Entity.fromJsonArray(serializedEntity);
+                    } catch (Exception e) {
+                        logger.error(new ParameterizedMessage("fail to parse entity", serializedEntity), e);
+                    }
+                }
+                return Optional.of(new SimpleImmutableEntry<>(new EntityModel(entity, samples, rcf, threshold), timestamp));
             });
-        } catch (RuntimeException e) {
+        } catch (Exception e) {
             logger.warn("Exception while deserializing checkpoint", e);
             throw e;
         }

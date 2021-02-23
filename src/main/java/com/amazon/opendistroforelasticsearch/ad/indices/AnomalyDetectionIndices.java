@@ -15,7 +15,7 @@
 
 package com.amazon.opendistroforelasticsearch.ad.indices;
 
-import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS;
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.AD_RESULT_HISTORY_MAX_DOCS_PER_SHARD;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.AD_RESULT_HISTORY_RETENTION_PERIOD;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.AD_RESULT_HISTORY_ROLLOVER_PERIOD;
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.ANOMALY_DETECTION_STATE_INDEX_MAPPING_FILE;
@@ -149,7 +149,7 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
         this.threadPool = threadPool;
         this.clusterService.addLocalNodeMasterListener(this);
         this.historyRolloverPeriod = AD_RESULT_HISTORY_ROLLOVER_PERIOD.get(settings);
-        this.historyMaxDocs = AD_RESULT_HISTORY_MAX_DOCS.get(settings);
+        this.historyMaxDocs = AD_RESULT_HISTORY_MAX_DOCS_PER_SHARD.get(settings);
         this.historyRetentionPeriod = AD_RESULT_HISTORY_RETENTION_PERIOD.get(settings);
         this.maxPrimaryShards = MAX_PRIMARY_SHARDS.get(settings);
 
@@ -160,7 +160,7 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
         this.allUpdated = false;
         this.updateRunning = new AtomicBoolean(false);
 
-        this.clusterService.getClusterSettings().addSettingsUpdateConsumer(AD_RESULT_HISTORY_MAX_DOCS, it -> historyMaxDocs = it);
+        this.clusterService.getClusterSettings().addSettingsUpdateConsumer(AD_RESULT_HISTORY_MAX_DOCS_PER_SHARD, it -> historyMaxDocs = it);
 
         this.clusterService.getClusterSettings().addSettingsUpdateConsumer(AD_RESULT_HISTORY_ROLLOVER_PERIOD, it -> {
             historyRolloverPeriod = it;
@@ -359,11 +359,15 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
                 Settings
                     .builder()
                     // put 1 primary shards per hot node if possible
-                    .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, Math.min(nodeFilter.getNumberOfEligibleDataNodes(), maxPrimaryShards))
+                    .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, getNumberOfPrimaryShards())
                     // 1 replica for better search performance and fail-over
                     .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 1)
                     .put("index.hidden", true)
             );
+    }
+
+    private int getNumberOfPrimaryShards() {
+        return Math.min(nodeFilter.getNumberOfEligibleDataNodes(), maxPrimaryShards);
     }
 
     /**
@@ -490,7 +494,7 @@ public class AnomalyDetectionIndices implements LocalNodeMasterListener {
 
         choosePrimaryShards(createRequest);
 
-        rollOverRequest.addMaxIndexDocsCondition(historyMaxDocs);
+        rollOverRequest.addMaxIndexDocsCondition(historyMaxDocs * getNumberOfPrimaryShards());
         adminClient.indices().rolloverIndex(rollOverRequest, ActionListener.wrap(response -> {
             if (!response.isRolledOver()) {
                 logger

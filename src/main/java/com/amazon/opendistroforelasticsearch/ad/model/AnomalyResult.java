@@ -77,7 +77,7 @@ public class AnomalyResult implements ToXContentObject, Writeable {
     private final Instant executionStartTime;
     private final Instant executionEndTime;
     private final String error;
-    private final List<Entity> entity;
+    private final Entity entity;
     private User user;
     private final Integer schemaVersion;
 
@@ -123,7 +123,7 @@ public class AnomalyResult implements ToXContentObject, Writeable {
         Instant executionStartTime,
         Instant executionEndTime,
         String error,
-        List<Entity> entity,
+        Entity entity,
         User user,
         Integer schemaVersion
     ) {
@@ -157,7 +157,7 @@ public class AnomalyResult implements ToXContentObject, Writeable {
         Instant executionStartTime,
         Instant executionEndTime,
         String error,
-        List<Entity> entity,
+        Entity entity,
         User user,
         Integer schemaVersion
     ) {
@@ -193,11 +193,7 @@ public class AnomalyResult implements ToXContentObject, Writeable {
         this.executionEndTime = input.readInstant();
         this.error = input.readOptionalString();
         if (input.readBoolean()) {
-            int entitySize = input.readVInt();
-            this.entity = new ArrayList<>(entitySize);
-            for (int i = 0; i < entitySize; i++) {
-                entity.add(new Entity(input));
-            }
+            this.entity = new Entity(input);
         } else {
             this.entity = null;
         }
@@ -243,7 +239,7 @@ public class AnomalyResult implements ToXContentObject, Writeable {
             xContentBuilder.field(ERROR_FIELD, error);
         }
         if (entity != null) {
-            xContentBuilder.field(ENTITY_FIELD, entity.toArray());
+            xContentBuilder.field(ENTITY_FIELD, entity);
         }
         if (user != null) {
             xContentBuilder.field(USER_FIELD, user);
@@ -265,7 +261,7 @@ public class AnomalyResult implements ToXContentObject, Writeable {
         Instant executionStartTime = null;
         Instant executionEndTime = null;
         String error = null;
-        List<Entity> entityList = null;
+        Entity entity = null;
         User user = null;
         Integer schemaVersion = CommonValue.NO_SCHEMA_VERSION;
         String taskId = null;
@@ -310,11 +306,7 @@ public class AnomalyResult implements ToXContentObject, Writeable {
                     error = parser.text();
                     break;
                 case ENTITY_FIELD:
-                    entityList = new ArrayList<>();
-                    ensureExpectedToken(XContentParser.Token.START_ARRAY, parser.currentToken(), parser);
-                    while (parser.nextToken() != XContentParser.Token.END_ARRAY) {
-                        entityList.add(Entity.parse(parser));
-                    }
+                    entity = Entity.parse(parser);
                     break;
                 case USER_FIELD:
                     user = User.parse(parser);
@@ -342,7 +334,7 @@ public class AnomalyResult implements ToXContentObject, Writeable {
             executionStartTime,
             executionEndTime,
             error,
-            entityList,
+            entity,
             user,
             schemaVersion
         );
@@ -453,7 +445,7 @@ public class AnomalyResult implements ToXContentObject, Writeable {
         return error;
     }
 
-    public List<Entity> getEntity() {
+    public Entity getEntity() {
         return entity;
     }
 
@@ -474,10 +466,7 @@ public class AnomalyResult implements ToXContentObject, Writeable {
         out.writeOptionalString(error);
         if (entity != null) {
             out.writeBoolean(true);
-            out.writeVInt(entity.size());
-            for (Entity entityItem : entity) {
-                entityItem.writeTo(out);
-            }
+            entity.writeTo(out);
         } else {
             out.writeBoolean(false);
         }

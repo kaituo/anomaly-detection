@@ -46,10 +46,13 @@ import org.junit.Test;
 import org.mockito.Mockito;
 
 import com.amazon.opendistroforelasticsearch.ad.TestHelpers;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.model.ADTask;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetectorJob;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 import com.amazon.opendistroforelasticsearch.ad.model.EntityProfile;
+import com.amazon.opendistroforelasticsearch.ad.model.InitProgressProfile;
 import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
 import com.amazon.opendistroforelasticsearch.ad.task.ADTaskManager;
 import com.amazon.opendistroforelasticsearch.ad.util.DiscoveryNodeFilterer;
@@ -57,10 +60,14 @@ import com.amazon.opendistroforelasticsearch.ad.util.RestHandlerUtils;
 import com.google.common.collect.ImmutableMap;
 
 public class GetAnomalyDetectorTransportActionTests extends ESSingleNodeTestCase {
+
     private GetAnomalyDetectorTransportAction action;
     private Task task;
     private ActionListener<GetAnomalyDetectorResponse> response;
     private ADTaskManager adTaskManager;
+    private Entity entity;
+    private String categoryField;
+    private String categoryValue;
 
     @Override
     @Before
@@ -94,6 +101,9 @@ public class GetAnomalyDetectorTransportActionTests extends ESSingleNodeTestCase
             @Override
             public void onFailure(Exception e) {}
         };
+        categoryField = "catField";
+        categoryValue = "app-0";
+        entity = Entity.createSingleAttributeEntity("detectorId", categoryField, categoryValue);
     }
 
     @Override
@@ -139,7 +149,7 @@ public class GetAnomalyDetectorTransportActionTests extends ESSingleNodeTestCase
 
     @Test
     public void testGetAnomalyDetectorRequest() throws IOException {
-        GetAnomalyDetectorRequest request = new GetAnomalyDetectorRequest("1234", 4321, true, false, "", "abcd", false, "value");
+        GetAnomalyDetectorRequest request = new GetAnomalyDetectorRequest("1234", 4321, true, false, "", "abcd", false, entity);
         BytesStreamOutput out = new BytesStreamOutput();
         request.writeTo(out);
         StreamInput input = out.bytes().streamInput();
@@ -192,12 +202,14 @@ public class GetAnomalyDetectorTransportActionTests extends ESSingleNodeTestCase
         Assert.assertEquals(map1.get("name"), detector.getName());
     }
 
+    @SuppressWarnings("unchecked")
     @Test
     public void testGetAnomalyDetectorProfileResponse() throws IOException {
         BytesStreamOutput out = new BytesStreamOutput();
         AnomalyDetector detector = TestHelpers.randomAnomalyDetector(ImmutableMap.of("testKey", "testValue"), Instant.now());
         AnomalyDetectorJob adJob = TestHelpers.randomAnomalyDetectorJob();
-        EntityProfile entityProfile = new EntityProfile.Builder("catField", "app-0").build();
+        InitProgressProfile initProgress = new InitProgressProfile("99%", 2L, 2);
+        EntityProfile entityProfile = new EntityProfile.Builder().initProgress(initProgress).build();
         GetAnomalyDetectorResponse response = new GetAnomalyDetectorResponse(
             4321,
             "1234",
@@ -219,8 +231,19 @@ public class GetAnomalyDetectorTransportActionTests extends ESSingleNodeTestCase
         XContentBuilder builder = TestHelpers.builder();
         Assert.assertNotNull(newResponse.toXContent(builder, ToXContent.EMPTY_PARAMS));
 
+        // {init_progress={percentage=99%, estimated_minutes_left=2, needed_shingles=2}}
         Map<String, Object> map = TestHelpers.XContentBuilderToMap(builder);
-        Assert.assertEquals(map.get(EntityProfile.CATEGORY_FIELD), "catField");
-        Assert.assertEquals(map.get(EntityProfile.ENTITY_VALUE), "app-0");
+        Map<String, Object> parsedInitProgress = (Map<String, Object>) (map.get(CommonName.INIT_PROGRESS));
+        Assert.assertEquals(initProgress.getPercentage(), parsedInitProgress.get(InitProgressProfile.PERCENTAGE).toString());
+        Assert
+            .assertEquals(
+                String.valueOf(initProgress.getEstimatedMinutesLeft()),
+                parsedInitProgress.get(InitProgressProfile.ESTIMATED_MINUTES_LEFT).toString()
+            );
+        Assert
+            .assertEquals(
+                String.valueOf(initProgress.getNeededDataPoints()),
+                parsedInitProgress.get(InitProgressProfile.NEEDED_SHINGLES).toString()
+            );
     }
 }

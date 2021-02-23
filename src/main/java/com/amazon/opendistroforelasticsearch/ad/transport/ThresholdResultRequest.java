@@ -28,7 +28,7 @@ import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 
 public class ThresholdResultRequest extends ActionRequest implements ToXContentObject {
     private String adID;
@@ -89,9 +89,9 @@ public class ThresholdResultRequest extends ActionRequest implements ToXContentO
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject();
-        builder.field(CommonMessageAttributes.ID_JSON_KEY, adID);
-        builder.field(CommonMessageAttributes.MODEL_ID_JSON_KEY, modelID);
-        builder.field(CommonMessageAttributes.RCF_SCORE_JSON_KEY, rcfScore);
+        builder.field(CommonName.ID_JSON_KEY, adID);
+        builder.field(CommonName.MODEL_ID_KEY, modelID);
+        builder.field(CommonName.RCF_SCORE_JSON_KEY, rcfScore);
         builder.endObject();
         return builder;
     }

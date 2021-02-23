@@ -23,7 +23,7 @@ import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 
 public class ThresholdResultResponse extends ActionResponse implements ToXContentObject {
     private double anomalyGrade;
@@ -57,8 +57,8 @@ public class ThresholdResultResponse extends ActionResponse implements ToXConten
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject();
-        builder.field(CommonMessageAttributes.ANOMALY_GRADE_JSON_KEY, anomalyGrade);
-        builder.field(CommonMessageAttributes.CONFIDENCE_JSON_KEY, confidence);
+        builder.field(CommonName.ANOMALY_GRADE_JSON_KEY, anomalyGrade);
+        builder.field(CommonName.CONFIDENCE_JSON_KEY, confidence);
         builder.endObject();
         return builder;
     }

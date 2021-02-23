@@ -33,6 +33,7 @@ import com.amazon.opendistroforelasticsearch.ad.caching.CacheProvider;
 import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
 import com.amazon.opendistroforelasticsearch.ad.model.DetectorProfileName;
+import com.amazon.opendistroforelasticsearch.ad.model.ModelProfile;
 
 /**
  *  This class contains the logic to extract the stats from the nodes
@@ -103,6 +104,7 @@ public class ProfileTransportAction extends TransportNodesAction<ProfileRequest,
         long activeEntity = 0;
         long totalUpdates = 0;
         Map<String, Long> modelSize = null;
+        List<ModelProfile> modelProfiles = null;
         if (request.isForMultiEntityDetector()) {
             if (profiles.contains(DetectorProfileName.ACTIVE_ENTITIES)) {
                 activeEntity = cacheProvider.get().getActiveEntities(detectorId);
@@ -110,8 +112,12 @@ public class ProfileTransportAction extends TransportNodesAction<ProfileRequest,
             if (profiles.contains(DetectorProfileName.INIT_PROGRESS)) {
                 totalUpdates = cacheProvider.get().getTotalUpdates(detectorId);
             }
-            if (profiles.contains(DetectorProfileName.TOTAL_SIZE_IN_BYTES) || profiles.contains(DetectorProfileName.MODELS)) {
+            if (profiles.contains(DetectorProfileName.TOTAL_SIZE_IN_BYTES)) {
                 modelSize = cacheProvider.get().getModelSize(detectorId);
+            }
+            // need to provide entity info for HCAD
+            if (profiles.contains(DetectorProfileName.MODELS)) {
+                modelProfiles = cacheProvider.get().getAllModelProfile(detectorId);
             }
         } else {
             if (profiles.contains(DetectorProfileName.COORDINATING_NODE) || profiles.contains(DetectorProfileName.SHINGLE_SIZE)) {
@@ -123,6 +129,6 @@ public class ProfileTransportAction extends TransportNodesAction<ProfileRequest,
             }
         }
 
-        return new ProfileNodeResponse(clusterService.localNode(), modelSize, shingleSize, activeEntity, totalUpdates);
+        return new ProfileNodeResponse(clusterService.localNode(), modelSize, shingleSize, activeEntity, totalUpdates, modelProfiles);
     }
 }

@@ -15,13 +15,12 @@
 
 package com.amazon.opendistroforelasticsearch.ad.transport;
 
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.MAX_ENTITIES_PER_INTERVAL;
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.PAGE_SIZE;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
@@ -29,29 +28,34 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
-import java.util.function.Function;
+import java.util.Set;
 
+import org.elasticsearch.Version;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.ActionFilters;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.action.support.master.AcknowledgedResponse;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
+import org.elasticsearch.cluster.node.DiscoveryNode;
+import org.elasticsearch.cluster.node.DiscoveryNodeRole;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.io.stream.StreamInput;
+import org.elasticsearch.common.settings.ClusterSettings;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
-import org.elasticsearch.index.IndexNotFoundException;
+import org.elasticsearch.common.xcontent.NamedXContentRegistry;
+import org.elasticsearch.test.ClusterServiceUtils;
+import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.ThreadPool;
-import org.elasticsearch.transport.Transport;
 import org.elasticsearch.transport.TransportException;
 import org.elasticsearch.transport.TransportInterceptor;
-import org.elasticsearch.transport.TransportRequest;
-import org.elasticsearch.transport.TransportRequestOptions;
 import org.elasticsearch.transport.TransportResponse;
 import org.elasticsearch.transport.TransportResponseHandler;
 import org.elasticsearch.transport.TransportService;
@@ -61,6 +65,7 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 
 import test.com.amazon.opendistroforelasticsearch.ad.util.MLUtil;
+import test.com.amazon.opendistroforelasticsearch.ad.util.RandomModelStateConfig;
 
 import com.amazon.opendistroforelasticsearch.ad.AbstractADTest;
 import com.amazon.opendistroforelasticsearch.ad.NodeStateManager;
@@ -69,10 +74,7 @@ import com.amazon.opendistroforelasticsearch.ad.breaker.ADCircuitBreakerService;
 import com.amazon.opendistroforelasticsearch.ad.caching.CacheProvider;
 import com.amazon.opendistroforelasticsearch.ad.caching.EntityCache;
 import com.amazon.opendistroforelasticsearch.ad.cluster.HashRing;
-import com.amazon.opendistroforelasticsearch.ad.common.exception.AnomalyDetectionException;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.EndRunException;
-import com.amazon.opendistroforelasticsearch.ad.common.exception.InternalFailure;
-import com.amazon.opendistroforelasticsearch.ad.common.exception.LimitExceededException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
 import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
 import com.amazon.opendistroforelasticsearch.ad.feature.SearchFeatureDao;
@@ -170,14 +172,24 @@ public class MultientityResultTests extends AbstractADTest {
 
         featureQuery = mock(FeatureManager.class);
 
-        normalModelManager = mock(ModelManager.class);
-        when(normalModelManager.getEntityModelId(anyString(), anyString())).thenReturn(modelId);
-
         normalModelPartitioner = mock(ModelPartitioner.class);
 
         hashRing = mock(HashRing.class);
 
-        clusterService = mock(ClusterService.class);
+        Set<Setting<?>> anomalyResultSetting = new HashSet<>(ClusterSettings.BUILT_IN_CLUSTER_SETTINGS);
+        anomalyResultSetting.add(MAX_ENTITIES_PER_INTERVAL);
+        anomalyResultSetting.add(PAGE_SIZE);
+        ClusterSettings clusterSettings = new ClusterSettings(Settings.EMPTY, anomalyResultSetting);
+
+        DiscoveryNode discoveryNode = new DiscoveryNode(
+            "node1",
+            ESTestCase.buildNewFakeTransportAddress(),
+            Collections.emptyMap(),
+            DiscoveryNodeRole.BUILT_IN_ROLES,
+            Version.CURRENT
+        );
+
+        clusterService = ClusterServiceUtils.createClusterService(threadPool, discoveryNode, clusterSettings);
 
         indexNameResolver = new IndexNameExpressionResolver(new ThreadContext(Settings.EMPTY));
 
@@ -212,13 +224,14 @@ public class MultientityResultTests extends AbstractADTest {
             adCircuitBreakerService,
             adStats,
             mockThreadPool,
-            searchFeatureDao
+            NamedXContentRegistry.EMPTY
         );
 
         provider = mock(CacheProvider.class);
         EntityCache entityCache = mock(EntityCache.class);
         when(provider.get()).thenReturn(entityCache);
-        when(entityCache.get(any(), any())).thenReturn(MLUtil.randomNonEmptyModelState());
+        when(entityCache.get(any(), any()))
+            .thenReturn(MLUtil.randomModelState(new RandomModelStateConfig.Builder().fullModel(true).build()));
 
         indexUtil = mock(AnomalyDetectionIndices.class);
         resultWriteQueue = mock(ResultWriteQueue.class);
@@ -235,53 +248,8 @@ public class MultientityResultTests extends AbstractADTest {
         super.tearDown();
     }
 
-    @SuppressWarnings("unchecked")
-    public void testQueryError() {
-        // non-EndRunException won't stop action from running
-        when(stateManager.fetchColdStartException(anyString())).thenReturn(Optional.of(new AnomalyDetectionException(detectorId, "")));
-
-        doAnswer(invocation -> {
-            ActionListener<Map<String, double[]>> listener = invocation.getArgument(3);
-            listener
-                .onFailure(
-                    new EndRunException(
-                        detectorId,
-                        CommonErrorMessages.INVALID_SEARCH_QUERY_MSG,
-                        new NoSuchElementException("No value present"),
-                        false
-                    )
-                );
-            return null;
-        }).when(searchFeatureDao).getFeaturesByEntities(any(), anyLong(), anyLong(), any());
-
-        PlainActionFuture<AnomalyResultResponse> listener = new PlainActionFuture<>();
-
-        action.doExecute(null, request, listener);
-
-        verify(stateManager, times(1)).getAnomalyDetector(anyString(), any(ActionListener.class));
-
-        assertException(listener, EndRunException.class, CommonErrorMessages.INVALID_SEARCH_QUERY_MSG);
-    }
-
-    public void testIndexNotFound() {
-        // non-EndRunException won't stop action from running
-        when(stateManager.fetchColdStartException(anyString())).thenReturn(Optional.of(new AnomalyDetectionException(detectorId, "")));
-
-        doAnswer(invocation -> {
-            ActionListener<Map<String, double[]>> listener = invocation.getArgument(3);
-            listener.onFailure(new IndexNotFoundException("", ""));
-            return null;
-        }).when(searchFeatureDao).getFeaturesByEntities(any(), anyLong(), anyLong(), any());
-
-        PlainActionFuture<AnomalyResultResponse> listener = new PlainActionFuture<>();
-
-        action.doExecute(null, request, listener);
-
-        assertException(listener, EndRunException.class, AnomalyResultTransportAction.TROUBLE_QUERYING_ERR_MSG);
-    }
-
     public void testColdStartEndRunException() {
-        when(stateManager.fetchColdStartException(anyString()))
+        when(stateManager.fetchExceptionAndClear(anyString()))
             .thenReturn(
                 Optional
                     .of(
@@ -296,21 +264,6 @@ public class MultientityResultTests extends AbstractADTest {
         PlainActionFuture<AnomalyResultResponse> listener = new PlainActionFuture<>();
         action.doExecute(null, request, listener);
         assertException(listener, EndRunException.class, CommonErrorMessages.INVALID_SEARCH_QUERY_MSG);
-    }
-
-    public void testEmptyFeatures() {
-        doAnswer(invocation -> {
-            ActionListener<Map<String, double[]>> listener = invocation.getArgument(3);
-            listener.onResponse(new HashMap<String, double[]>());
-            return null;
-        }).when(searchFeatureDao).getFeaturesByEntities(any(), anyLong(), anyLong(), any());
-
-        PlainActionFuture<AnomalyResultResponse> listener = new PlainActionFuture<>();
-
-        action.doExecute(null, request, listener);
-
-        AnomalyResultResponse response = listener.actionGet(10000L);
-        assertEquals(Double.NaN, response.getAnomalyGrade(), 0.01);
     }
 
     private <T extends TransportResponse> TransportResponseHandler<T> entityResultHandler(TransportResponseHandler<T> handler) {
@@ -382,126 +335,5 @@ public class MultientityResultTests extends AbstractADTest {
         );
 
         when(normalModelManager.score(any(), anyString(), any())).thenReturn(new ThresholdingResult(0, 1, 1));
-    }
-
-    private <T extends TransportResponse> void setUpTransportInterceptor(
-        Function<TransportResponseHandler<T>, TransportResponseHandler<T>> interceptor
-    ) {
-        doAnswer(invocation -> {
-            ActionListener<Map<String, double[]>> listener = invocation.getArgument(3);
-            Map<String, double[]> features = new HashMap<String, double[]>();
-            features.put("1.0.2.3", new double[] { 0 });
-            features.put("2.0.2.3", new double[] { 1 });
-            listener.onResponse(features);
-            return null;
-        }).when(searchFeatureDao).getFeaturesByEntities(any(), anyLong(), anyLong(), any());
-
-        entityResultInterceptor = new TransportInterceptor() {
-            @Override
-            public AsyncSender interceptSender(AsyncSender sender) {
-                return new AsyncSender() {
-                    @SuppressWarnings("unchecked")
-                    @Override
-                    public <T2 extends TransportResponse> void sendRequest(
-                        Transport.Connection connection,
-                        String action,
-                        TransportRequest request,
-                        TransportRequestOptions options,
-                        TransportResponseHandler<T2> handler
-                    ) {
-                        if (action.equals(EntityResultAction.NAME)) {
-                            sender
-                                .sendRequest(
-                                    connection,
-                                    action,
-                                    request,
-                                    options,
-                                    interceptor.apply((TransportResponseHandler<T>) handler)
-                                );
-                        } else {
-                            sender.sendRequest(connection, action, request, options, handler);
-                        }
-                    }
-                };
-            }
-        };
-
-        setupTestNodes(settings, entityResultInterceptor);
-
-        // mock hashing ring response. This has to happen after setting up test nodes with the failure interceptor
-        when(hashRing.getOwningNode(any(String.class))).thenReturn(Optional.of(testNodes[1].discoveryNode()));
-
-        TransportService realTransportService = testNodes[0].transportService;
-        ClusterService realClusterService = testNodes[0].clusterService;
-
-        action = new AnomalyResultTransportAction(
-            new ActionFilters(Collections.emptySet()),
-            realTransportService,
-            settings,
-            client,
-            stateManager,
-            featureQuery,
-            normalModelManager,
-            normalModelPartitioner,
-            hashRing,
-            realClusterService,
-            indexNameResolver,
-            adCircuitBreakerService,
-            adStats,
-            threadPool,
-            searchFeatureDao
-        );
-    }
-
-    public void testNonEmptyFeatures() {
-        setUpTransportInterceptor(this::entityResultHandler);
-        setUpEntityResult();
-
-        PlainActionFuture<AnomalyResultResponse> listener = new PlainActionFuture<>();
-
-        action.doExecute(null, request, listener);
-
-        AnomalyResultResponse response = listener.actionGet(10000L);
-        assertEquals(0d, response.getAnomalyGrade(), 0.01);
-    }
-
-    public void testCircuitBreakerOpen() {
-        setUpTransportInterceptor(this::entityResultHandler);
-
-        ADCircuitBreakerService openBreaker = mock(ADCircuitBreakerService.class);
-        when(openBreaker.isOpen()).thenReturn(true);
-        // register entity result action
-        new EntityResultTransportAction(
-            new ActionFilters(Collections.emptySet()),
-            // since we send requests to testNodes[1]
-            testNodes[1].transportService,
-            normalModelManager,
-            openBreaker,
-            provider,
-            stateManager,
-            indexUtil,
-            resultWriteQueue,
-            checkpointReadQueue,
-            coldStarer,
-            coldEntityQueue,
-            threadPool
-        );
-
-        PlainActionFuture<AnomalyResultResponse> listener = new PlainActionFuture<>();
-
-        action.doExecute(null, request, listener);
-        assertException(listener, LimitExceededException.class, CommonErrorMessages.MEMORY_CIRCUIT_BROKEN_ERR_MSG);
-    }
-
-    public void testNotAck() {
-        setUpTransportInterceptor(this::unackEntityResultHandler);
-        setUpEntityResult();
-
-        PlainActionFuture<AnomalyResultResponse> listener = new PlainActionFuture<>();
-
-        action.doExecute(null, request, listener);
-
-        assertException(listener, InternalFailure.class, AnomalyResultTransportAction.NO_ACK_ERR);
-        verify(stateManager, times(1)).addPressure(anyString());
     }
 }

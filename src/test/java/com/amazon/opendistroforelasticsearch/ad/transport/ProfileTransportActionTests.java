@@ -41,6 +41,8 @@ import com.amazon.opendistroforelasticsearch.ad.caching.EntityCache;
 import com.amazon.opendistroforelasticsearch.ad.feature.FeatureManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
 import com.amazon.opendistroforelasticsearch.ad.model.DetectorProfileName;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
+import com.amazon.opendistroforelasticsearch.ad.model.ModelProfile;
 
 public class ProfileTransportActionTests extends ESIntegTestCase {
     private ProfileTransportAction action;
@@ -72,9 +74,21 @@ public class ProfileTransportActionTests extends ESIntegTestCase {
         when(cache.getActiveEntities(anyString())).thenReturn(activeEntities);
         when(cache.getTotalUpdates(anyString())).thenReturn(totalUpdates);
         Map<String, Long> multiEntityModelSizeMap = new HashMap<>();
-        multiEntityModelSizeMap.put("T4c3dXUBj-2IZN7itix__entity_app_3", multiEntityModelSize);
-        multiEntityModelSizeMap.put("T4c3dXUBj-2IZN7itix__entity_app_2", multiEntityModelSize);
+        String modelId1 = "T4c3dXUBj-2IZN7itix__entity_app_3";
+        String modelId2 = "T4c3dXUBj-2IZN7itix__entity_app_2";
+        multiEntityModelSizeMap.put(modelId1, multiEntityModelSize);
+        multiEntityModelSizeMap.put(modelId2, multiEntityModelSize);
         when(cache.getModelSize(anyString())).thenReturn(multiEntityModelSizeMap);
+
+        List<ModelProfile> modelProfiles = new ArrayList<>();
+        String field = "field";
+        String fieldVal1 = "value1";
+        String fieldVal2 = "value2";
+        Entity entity1 = Entity.createSingleAttributeEntity(detectorId, field, fieldVal1);
+        Entity entity2 = Entity.createSingleAttributeEntity(detectorId, field, fieldVal2);
+        modelProfiles.add(new ModelProfile(modelId1, entity1, multiEntityModelSize));
+        modelProfiles.add(new ModelProfile(modelId1, entity2, multiEntityModelSize));
+        when(cache.getAllModelProfile(anyString())).thenReturn(modelProfiles);
 
         Map<String, Long> modelSizes = new HashMap<>();
         modelSizes.put(modelId, modelSize);
@@ -99,7 +113,7 @@ public class ProfileTransportActionTests extends ESIntegTestCase {
         DiscoveryNode node = clusterService().localNode();
         ProfileRequest profileRequest = new ProfileRequest(detectorId, profilesToRetrieve, false, node);
 
-        ProfileNodeResponse profileNodeResponse1 = new ProfileNodeResponse(node, new HashMap<>(), shingleSize, 0, 0);
+        ProfileNodeResponse profileNodeResponse1 = new ProfileNodeResponse(node, new HashMap<>(), shingleSize, 0, 0, new ArrayList<>());
         List<ProfileNodeResponse> profileNodeResponses = Arrays.asList(profileNodeResponse1);
         List<FailedNodeException> failures = new ArrayList<>();
 
@@ -168,7 +182,8 @@ public class ProfileTransportActionTests extends ESIntegTestCase {
         response = action.nodeOperation(new ProfileNodeRequest(profileRequest));
 
         assertEquals(activeEntities, response.getActiveEntities());
-        assertEquals(2, response.getModelSize().size());
+        assertEquals(null, response.getModelSize());
+        assertEquals(2, response.getModelProfiles().size());
         assertEquals(totalUpdates, response.getTotalUpdates());
     }
 }

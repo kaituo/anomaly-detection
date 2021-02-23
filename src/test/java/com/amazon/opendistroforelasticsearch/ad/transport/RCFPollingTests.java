@@ -59,7 +59,7 @@ import com.amazon.opendistroforelasticsearch.ad.TestHelpers;
 import com.amazon.opendistroforelasticsearch.ad.cluster.HashRing;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.AnomalyDetectionException;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.JsonPathNotFoundException;
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelPartitioner;
 import com.google.gson.Gson;
@@ -302,7 +302,7 @@ public class RCFPollingTests extends AbstractADTest {
     }
 
     public void testGetRemoteNormalResponse() {
-        setupTestNodes(Settings.EMPTY, normalTransportInterceptor);
+        setupTestNodes(normalTransportInterceptor, Settings.EMPTY);
         try {
             TransportService realTransportService = testNodes[0].transportService;
             clusterService = testNodes[0].clusterService;
@@ -330,7 +330,7 @@ public class RCFPollingTests extends AbstractADTest {
     }
 
     public void testGetRemoteFailureResponse() {
-        setupTestNodes(Settings.EMPTY, failureTransportInterceptor);
+        setupTestNodes(failureTransportInterceptor, Settings.EMPTY);
         try {
             TransportService realTransportService = testNodes[0].transportService;
             clusterService = testNodes[0].clusterService;
@@ -365,7 +365,7 @@ public class RCFPollingTests extends AbstractADTest {
     public void testRequestToXContent() throws IOException, JsonPathNotFoundException {
         RCFPollingRequest response = new RCFPollingRequest(detectorId);
         String json = TestHelpers.xContentBuilderToString(response.toXContent(TestHelpers.builder(), ToXContent.EMPTY_PARAMS));
-        assertEquals(detectorId, JsonDeserializer.getTextValue(json, CommonMessageAttributes.ID_JSON_KEY));
+        assertEquals(detectorId, JsonDeserializer.getTextValue(json, CommonName.ID_JSON_KEY));
     }
 
     public void testNullDetectorId() {

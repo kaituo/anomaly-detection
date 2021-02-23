@@ -624,7 +624,7 @@ public class TestHelpers {
             Instant.now().truncatedTo(ChronoUnit.SECONDS),
             Instant.now().truncatedTo(ChronoUnit.SECONDS),
             error,
-            Arrays.asList(new Entity(randomAlphaOfLength(5), randomAlphaOfLength(5))),
+            Entity.createSingleAttributeEntity(randomAlphaOfLength(5), randomAlphaOfLength(5), randomAlphaOfLength(5)),
             randomUser(),
             CommonValue.NO_SCHEMA_VERSION
         );

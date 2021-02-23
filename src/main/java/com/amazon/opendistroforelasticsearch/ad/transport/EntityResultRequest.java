@@ -21,6 +21,8 @@ import java.io.IOException;
 import java.util.Locale;
 import java.util.Map;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.common.Strings;
@@ -30,24 +32,26 @@ import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
 
 public class EntityResultRequest extends ActionRequest implements ToXContentObject {
+    private static final Logger LOG = LogManager.getLogger(EntityResultRequest.class);
 
     private String detectorId;
-    private Map<String, double[]> entities;
+    private Map<Entity, double[]> entities;
     private long start;
     private long end;
 
     public EntityResultRequest(StreamInput in) throws IOException {
         super(in);
         this.detectorId = in.readString();
-        this.entities = in.readMap(StreamInput::readString, StreamInput::readDoubleArray);
+        this.entities = in.readMap(Entity::new, StreamInput::readDoubleArray);
         this.start = in.readLong();
         this.end = in.readLong();
     }
 
-    public EntityResultRequest(String detectorId, Map<String, double[]> entities, long start, long end) {
+    public EntityResultRequest(String detectorId, Map<Entity, double[]> entities, long start, long end) {
         super();
         this.detectorId = detectorId;
         this.entities = entities;
@@ -59,7 +63,7 @@ public class EntityResultRequest extends ActionRequest implements ToXContentObje
         return this.detectorId;
     }
 
-    public Map<String, double[]> getEntities() {
+    public Map<Entity, double[]> getEntities() {
         return this.entities;
     }
 
@@ -75,7 +79,7 @@ public class EntityResultRequest extends ActionRequest implements ToXContentObje
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
         out.writeString(this.detectorId);
-        out.writeMap(this.entities, StreamOutput::writeString, StreamOutput::writeDoubleArray);
+        out.writeMap(entities, (s, e) -> e.writeTo(s), StreamOutput::writeDoubleArray);
         out.writeLong(this.start);
         out.writeLong(this.end);
     }
@@ -98,12 +102,19 @@ public class EntityResultRequest extends ActionRequest implements ToXContentObje
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject();
-        builder.field(CommonMessageAttributes.ID_JSON_KEY, detectorId);
-        builder.field(CommonMessageAttributes.START_JSON_KEY, start);
-        builder.field(CommonMessageAttributes.END_JSON_KEY, end);
-        for (String entity : entities.keySet()) {
-            builder.field(entity, entities.get(entity));
+        builder.field(CommonName.ID_JSON_KEY, detectorId);
+        builder.field(CommonName.START_JSON_KEY, start);
+        builder.field(CommonName.END_JSON_KEY, end);
+        builder.startArray(CommonName.ENTITIES_JSON_KEY);
+        for (final Map.Entry<Entity, double[]> entry : entities.entrySet()) {
+            if (entry.getKey() != null) {
+                builder.startObject();
+                builder.field(CommonName.ENTITY_KEY, entry.getKey());
+                builder.field(CommonName.VALUE_JSON_KEY, entry.getValue());
+                builder.endObject();
+            }
         }
+        builder.endArray();
         builder.endObject();
         return builder;
     }

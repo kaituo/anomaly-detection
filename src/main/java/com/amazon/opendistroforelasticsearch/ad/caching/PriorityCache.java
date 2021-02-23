@@ -16,6 +16,7 @@
 package com.amazon.opendistroforelasticsearch.ad.caching;
 
 import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.DEDICATED_CACHE_SIZE;
+import static com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings.MODEL_MAX_SIZE_PERCENTAGE;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -28,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.PriorityQueue;
 import java.util.Random;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
@@ -56,6 +58,8 @@ import com.amazon.opendistroforelasticsearch.ad.ml.EntityModel;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager.ModelType;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelState;
 import com.amazon.opendistroforelasticsearch.ad.model.AnomalyDetector;
+import com.amazon.opendistroforelasticsearch.ad.model.Entity;
+import com.amazon.opendistroforelasticsearch.ad.model.ModelProfile;
 import com.amazon.opendistroforelasticsearch.ad.ratelimit.CheckpointWriteQueue;
 import com.amazon.opendistroforelasticsearch.ad.settings.AnomalyDetectorSettings;
 import com.google.common.cache.Cache;
@@ -85,6 +89,7 @@ public class PriorityCache implements EntityCache {
     // iterating through all of inactive entities is heavy. We don't want to do
     // it again and again for no obvious benefits.
     private Instant lastInActiveEntityMaintenance;
+    protected int maintenanceFreqConstant;
 
     public PriorityCache(
         CheckpointDao checkpointDao,
@@ -97,14 +102,20 @@ public class PriorityCache implements EntityCache {
         ClusterService clusterService,
         Duration modelTtl,
         ThreadPool threadPool,
-        CheckpointWriteQueue checkpointWriteQueue
+        CheckpointWriteQueue checkpointWriteQueue,
+        int maintenanceFreqConstant
     ) {
         this.checkpointDao = checkpointDao;
 
-        this.dedicatedCacheSize = dedicatedCacheSize;
-        clusterService.getClusterSettings().addSettingsUpdateConsumer(DEDICATED_CACHE_SIZE, it -> this.dedicatedCacheSize = it);
-
         this.activeEnities = new ConcurrentHashMap<>();
+        this.dedicatedCacheSize = dedicatedCacheSize;
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(DEDICATED_CACHE_SIZE, it -> {
+            this.dedicatedCacheSize = it;
+            this.setDedicatedCacheSizeListener();
+            this.tryClearUpMemory();
+        });
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(MODEL_MAX_SIZE_PERCENTAGE, it -> this.tryClearUpMemory());
+
         this.memoryTracker = memoryTracker;
         this.maintenanceLock = new ReentrantLock();
         this.numberOfTrees = numberOfTrees;
@@ -123,6 +134,7 @@ public class PriorityCache implements EntityCache {
         this.random = new Random(42);
         this.checkpointWriteQueue = checkpointWriteQueue;
         this.lastInActiveEntityMaintenance = Instant.MIN;
+        this.maintenanceFreqConstant = maintenanceFreqConstant;
     }
 
     @Override
@@ -186,6 +198,11 @@ public class PriorityCache implements EntityCache {
 
                 // update state using new priority or create a new one
                 state.setPriority(buffer.getPriorityTracker().getUpdatedPriority(state.getPriority()));
+
+                // adjust shared memory in case we have used dedicated cache memory for other detectors
+                if (random.nextInt(maintenanceFreqConstant) == 1) {
+                    tryClearUpMemory();
+                }
             } catch (Exception e) {
                 LOG.error(new ParameterizedMessage("Fail to update priority of [{}]", modelId), e);
             }
@@ -232,6 +249,13 @@ public class PriorityCache implements EntityCache {
 
         // current buffer's dedicated cache has free slots or can allocate in shared cache
         if (buffer.dedicatedCacheAvailable() || memoryTracker.canAllocate(buffer.getMemoryConsumptionPerEntity())) {
+            // buffer.put will call MemoryTracker.consumeMemory
+            buffer.put(modelId, toUpdate);
+            return true;
+        }
+
+        if (memoryTracker.canAllocate(buffer.getMemoryConsumptionPerEntity())) {
+            // buffer.put will call MemoryTracker.consumeMemory
             buffer.put(modelId, toUpdate);
             return true;
         }
@@ -242,9 +266,7 @@ public class PriorityCache implements EntityCache {
             // null in the case of some other threads have emptied the queue at
             // the same time so there is nothing to replace
             if (removed != null) {
-                // set last used time for profile API so that we know when an entities is evicted
-                removed.setLastUsedTime(clock.instant());
-                inActiveEntities.put(removed.getModelId(), removed);
+                addIntoInactiveCache(removed);
                 return true;
             }
         }
@@ -258,27 +280,45 @@ public class PriorityCache implements EntityCache {
         ModelState<EntityModel> removed = null;
         if (bufferToRemove != null && ((removed = bufferToRemove.remove(entityModelId)) != null)) {
             buffer.put(modelId, toUpdate);
-            // set last used time for profile API so that we know when an entities is evicted
-            removed.setLastUsedTime(clock.instant());
-            inActiveEntities.put(removed.getModelId(), removed);
+            addIntoInactiveCache(removed);
             return true;
         }
 
         return false;
     }
 
+    private void addIntoInactiveCache(ModelState<EntityModel> removed) {
+        if (removed == null) {
+            return;
+        }
+        // set last used time for profile API so that we know when an entities is evicted
+        removed.setLastUsedTime(clock.instant());
+        removed.setModel(null);
+        inActiveEntities.put(removed.getModelId(), removed);
+    }
+
+    private void addEntity(List<Entity> destination, Entity entity, String detectorId) {
+        // It's possible our doorkeepr prevented the entity from entering inactive entities cache
+        if (entity != null) {
+            Optional<String> modelId = entity.getModelId(detectorId);
+            if (modelId.isPresent() && inActiveEntities.getIfPresent(modelId.get()) != null) {
+                destination.add(entity);
+            }
+        }
+    }
+
     @Override
-    public Pair<List<String>, List<String>> selectUpdateCandidate(
-        Collection<String> cacheMissEntities,
+    public Pair<List<Entity>, List<Entity>> selectUpdateCandidate(
+        Collection<Entity> cacheMissEntities,
         String detectorId,
         AnomalyDetector detector
     ) {
-        List<String> hotEntities = new ArrayList<>();
+        List<Entity> hotEntities = new ArrayList<>();
         CacheBuffer buffer = computeBufferIfAbsent(detector, detectorId);
-        Iterator<String> cacheMissEntitiesIter = cacheMissEntities.iterator();
+        Iterator<Entity> cacheMissEntitiesIter = cacheMissEntities.iterator();
         // current buffer's dedicated cache has free slots
         while (cacheMissEntitiesIter.hasNext() && buffer.dedicatedCacheAvailable()) {
-            hotEntities.add(cacheMissEntitiesIter.next());
+            addEntity(hotEntities, cacheMissEntitiesIter.next(), detectorId);
         }
 
         while (cacheMissEntitiesIter.hasNext() && memoryTracker.canAllocate(buffer.getMemoryConsumptionPerEntity())) {
@@ -288,22 +328,27 @@ public class PriorityCache implements EntityCache {
             // more things than we planned. One model in HCAD is small,
             // it is fine we exceed a little. We have regular maintenance to remove
             // extra memory usage.
-            hotEntities.add(cacheMissEntitiesIter.next());
+            addEntity(hotEntities, cacheMissEntitiesIter.next(), detectorId);
         }
 
         // check if we can replace anything in dedicated or shared cache
         // have a copy since we need to do the iteration twice: one for
         // dedicated cache and one for shared cache
-        List<String> otherBufferReplaceCandidates = new ArrayList<>();
+        List<Entity> otherBufferReplaceCandidates = new ArrayList<>();
 
         while (cacheMissEntitiesIter.hasNext()) {
             // can replace an entity in the same CacheBuffer living in reserved
             // or shared cache
             // thread safe as each detector has one thread at one time and only the
             // thread can access its buffer.
-            String modelId = cacheMissEntitiesIter.next();
+            Entity entity = cacheMissEntitiesIter.next();
+            Optional<String> modelId = entity.getModelId(detectorId);
 
-            Optional<ModelState<EntityModel>> state = getStateFromInactiveEntiiyCache(modelId);
+            if (false == modelId.isPresent()) {
+                continue;
+            }
+
+            Optional<ModelState<EntityModel>> state = getStateFromInactiveEntiiyCache(modelId.get());
             if (false == state.isPresent()) {
                 // not even recorded in inActiveEntities yet because of doorKeeper
                 continue;
@@ -313,10 +358,10 @@ public class PriorityCache implements EntityCache {
             float priority = modelState.getPriority();
 
             if (buffer.canReplaceWithinDetector(priority)) {
-                hotEntities.add(modelId);
+                addEntity(hotEntities, entity, detectorId);
             } else {
                 // re-evaluate replacement condition in other buffers
-                otherBufferReplaceCandidates.add(modelId);
+                otherBufferReplaceCandidates.add(entity);
             }
         }
 
@@ -328,26 +373,32 @@ public class PriorityCache implements EntityCache {
         // check if we can replace in other CacheBuffer
         cacheMissEntitiesIter = otherBufferReplaceCandidates.iterator();
 
-        List<String> coldEntities = new ArrayList<>();
+        List<Entity> coldEntities = new ArrayList<>();
 
         while (cacheMissEntitiesIter.hasNext()) {
             // If two threads try to remove the same entity and add their own state, the 2nd remove
             // returns null and only the first one succeeds.
-            String modelId = cacheMissEntitiesIter.next();
-            Optional<ModelState<EntityModel>> maybeState = getStateFromInactiveEntiiyCache(modelId);
-            if (false == maybeState.isPresent()) {
+            Entity entity = cacheMissEntitiesIter.next();
+            Optional<String> modelId = entity.getModelId(detectorId);
+
+            if (false == modelId.isPresent()) {
+                continue;
+            }
+
+            Optional<ModelState<EntityModel>> inactiveState = getStateFromInactiveEntiiyCache(modelId.get());
+            if (false == inactiveState.isPresent()) {
                 // empty state should not stand a chance to replace others
                 continue;
             }
 
-            ModelState<EntityModel> state = maybeState.get();
+            ModelState<EntityModel> state = inactiveState.get();
 
             float priority = state.getPriority();
             float scaledPriority = buffer.getPriorityTracker().getScaledPriority(priority);
 
             if (scaledPriority <= minPriority) {
                 // not even larger than the minPriority, we can put this to coldEntities
-                coldEntities.add(modelId);
+                addEntity(coldEntities, entity, detectorId);
                 continue;
             }
 
@@ -359,13 +410,13 @@ public class PriorityCache implements EntityCache {
             }
 
             if (bufferToRemove != null) {
-                hotEntities.add(modelId);
+                addEntity(hotEntities, entity, detectorId);
                 // reset minPriority after the replacement so that we need to iterate all CacheBuffer
                 // again
                 minPriority = Float.MIN_VALUE;
             } else {
                 // after trying everything, we can now safely put this to cold entities list
-                coldEntities.add(modelId);
+                addEntity(coldEntities, entity, detectorId);
             }
         }
 
@@ -373,13 +424,13 @@ public class PriorityCache implements EntityCache {
     }
 
     private CacheBuffer computeBufferIfAbsent(AnomalyDetector detector, String detectorId) {
-        return activeEnities.computeIfAbsent(detectorId, k -> {
+        CacheBuffer buffer = activeEnities.get(detectorId);
+        if (buffer == null) {
             long requiredBytes = getReservedDetectorMemory(detector);
-            tryClearUpMemory();
             if (memoryTracker.canAllocateReserved(detectorId, requiredBytes)) {
-                memoryTracker.consumeMemory(requiredBytes, true, Origin.MULTI_ENTITY_DETECTOR);
+                memoryTracker.consumeMemory(requiredBytes, true, Origin.HC_DETECTOR);
                 long intervalSecs = detector.getDetectorIntervalInSeconds();
-                return new CacheBuffer(
+                buffer = new CacheBuffer(
                     dedicatedCacheSize,
                     intervalSecs,
                     memoryTracker.estimateModelSize(detector, numberOfTrees),
@@ -390,10 +441,18 @@ public class PriorityCache implements EntityCache {
                     checkpointWriteQueue,
                     random
                 );
+                activeEnities.put(detectorId, buffer);
+                // There can be race conditions between tryClearUpMemory and
+                // activeEntities.put above as tryClearUpMemory accesses activeEnities too.
+                // Put tryClearUpMemory after consumeMemory to prevent that.
+                tryClearUpMemory();
+            } else {
+                // if hosting not allowed, exception will be thrown by isHostingAllowed
+                throw new LimitExceededException(detectorId, CommonErrorMessages.MEMORY_LIMIT_EXCEEDED_ERR_MSG);
             }
-            // if hosting not allowed, exception will be thrown by isHostingAllowed
-            throw new LimitExceededException(detectorId, CommonErrorMessages.MEMORY_LIMIT_EXCEEDED_ERR_MSG);
-        });
+
+        }
+        return buffer;
     }
 
     private long getReservedDetectorMemory(AnomalyDetector detector) {
@@ -430,10 +489,15 @@ public class PriorityCache implements EntityCache {
         return Triple.of(minPriorityBuffer, minPriorityEntityModelId, minPriority);
     }
 
+    /**
+     * Clear up overused memory.  Can happen due to race condition or other detectors
+     * consumes resources from shared memory.
+     * tryClearUpMemory is ran using AD threadpool because the function is expensive.
+     */
     private void tryClearUpMemory() {
         try {
             if (maintenanceLock.tryLock()) {
-                clearMemory();
+                threadPool.executor(AnomalyDetectorPlugin.AD_THREAD_POOL_NAME).execute(() -> clearMemory());
             } else {
                 threadPool.schedule(() -> {
                     try {
@@ -453,29 +517,41 @@ public class PriorityCache implements EntityCache {
     private void clearMemory() {
         recalculateUsedMemory();
         long memoryToShed = memoryTracker.memoryToShed();
-        float minPriority = Float.MAX_VALUE;
-        CacheBuffer minPriorityBuffer = null;
-        String minPriorityEntityModelId = null;
-        while (memoryToShed > 0) {
+        PriorityQueue<Triple<Float, CacheBuffer, String>> removalCandiates = null;
+        if (memoryToShed > 0) {
+            // sort the triple in an ascending order of priority
+            removalCandiates = new PriorityQueue<>((x, y) -> Float.compare(x.getLeft(), y.getLeft()));
             for (Map.Entry<String, CacheBuffer> entry : activeEnities.entrySet()) {
                 CacheBuffer buffer = entry.getValue();
                 Entry<String, Float> priorityEntry = buffer.getPriorityTracker().getMinimumScaledPriority();
                 float priority = priorityEntry.getValue();
-                if (buffer.canRemove() && priority < minPriority) {
-                    minPriority = priority;
-                    minPriorityBuffer = buffer;
-                    minPriorityEntityModelId = priorityEntry.getKey();
+                if (buffer.canRemove()) {
+                    removalCandiates.add(Triple.of(priority, buffer, priorityEntry.getKey()));
                 }
             }
-            if (minPriorityBuffer != null) {
-                minPriorityBuffer.remove(minPriorityEntityModelId);
-                long memoryReleased = minPriorityBuffer.getMemoryConsumptionPerEntity();
-                memoryTracker.releaseMemory(memoryReleased, false, Origin.MULTI_ENTITY_DETECTOR);
-                memoryToShed -= memoryReleased;
-            } else {
+        }
+        while (memoryToShed > 0) {
+            if (false == removalCandiates.isEmpty()) {
+                Triple<Float, CacheBuffer, String> toRemove = removalCandiates.poll();
+                CacheBuffer minPriorityBuffer = toRemove.getMiddle();
+                String minPriorityEntityModelId = toRemove.getRight();
+
+                ModelState<EntityModel> removed = minPriorityBuffer.remove(minPriorityEntityModelId);
+                memoryToShed -= minPriorityBuffer.getMemoryConsumptionPerEntity();
+                addIntoInactiveCache(removed);
+
+                if (minPriorityBuffer.canRemove()) {
+                    // can remove another one
+                    Entry<String, Float> priorityEntry = minPriorityBuffer.getPriorityTracker().getMinimumScaledPriority();
+                    removalCandiates.add(Triple.of(priorityEntry.getValue(), minPriorityBuffer, priorityEntry.getKey()));
+                }
+            }
+
+            if (removalCandiates.isEmpty()) {
                 break;
             }
         }
+
     }
 
     /**
@@ -489,7 +565,7 @@ public class PriorityCache implements EntityCache {
             reserved += buffer.getReservedBytes();
             shared += buffer.getBytesInSharedCache();
         }
-        memoryTracker.syncMemoryState(Origin.MULTI_ENTITY_DETECTOR, reserved + shared, reserved);
+        memoryTracker.syncMemoryState(Origin.HC_DETECTOR, reserved + shared, reserved);
     }
 
     /**
@@ -512,7 +588,10 @@ public class PriorityCache implements EntityCache {
                     activeEnities.remove(detectorId);
                     cacheBuffer.clear();
                 } else {
-                    cacheBuffer.maintenance();
+                    List<ModelState<EntityModel>> removedStates = cacheBuffer.maintenance();
+                    for (ModelState<EntityModel> state : removedStates) {
+                        addIntoInactiveCache(state);
+                    }
                 }
             });
 
@@ -648,22 +727,6 @@ public class PriorityCache implements EntityCache {
         return res;
     }
 
-    @Override
-    /**
-     * Gets an entity's model state
-     *
-     * @param detectorId detector id
-     * @param entityModelId  entity model id
-     * @return the model state
-     */
-    public long getModelSize(String detectorId, String entityModelId) {
-        CacheBuffer cacheBuffer = activeEnities.get(detectorId);
-        if (cacheBuffer != null && cacheBuffer.getModel(entityModelId).isPresent()) {
-            return cacheBuffer.getMemoryConsumptionPerEntity();
-        }
-        return -1L;
-    }
-
     /**
      * Return the last active time of an entity's state.
      *
@@ -697,7 +760,8 @@ public class PriorityCache implements EntityCache {
         tryClearUpMemory();
         activeEnities.values().stream().forEach(cacheBuffer -> {
             if (cacheBuffer.canRemove()) {
-                cacheBuffer.remove();
+                ModelState<EntityModel> removed = cacheBuffer.remove();
+                addIntoInactiveCache(removed);
             }
         });
     }
@@ -728,5 +792,52 @@ public class PriorityCache implements EntityCache {
         }
 
         lastInActiveEntityMaintenance = clock.instant();
+    }
+
+    /**
+     * Called when dedicated cache size changes.  Will adjust existing cache buffer's
+     * cache size
+     */
+    private void setDedicatedCacheSizeListener() {
+        activeEnities.values().stream().forEach(cacheBuffer -> cacheBuffer.setMinimumCapacity(dedicatedCacheSize));
+    }
+
+    @Override
+    public List<ModelProfile> getAllModelProfile(String detectorId) {
+        CacheBuffer cacheBuffer = activeEnities.get(detectorId);
+        List<ModelProfile> res = new ArrayList<>();
+        if (cacheBuffer != null) {
+            long size = cacheBuffer.getMemoryConsumptionPerEntity();
+            cacheBuffer.getAllModels().forEach(entry -> {
+                EntityModel model = entry.getModel();
+                Entity entity = null;
+                if (model != null && model.getEntity().isPresent()) {
+                    entity = model.getEntity().get();
+                }
+                res.add(new ModelProfile(entry.getModelId(), entity, size));
+            });
+        }
+        return res;
+    }
+
+    /**
+     * Gets an entity's model state
+     *
+     * @param detectorId detector id
+     * @param entityModelId  entity model id
+     * @return the model state
+     */
+    @Override
+    public Optional<ModelProfile> getModelProfile(String detectorId, String entityModelId) {
+        CacheBuffer cacheBuffer = activeEnities.get(detectorId);
+        if (cacheBuffer != null && cacheBuffer.getModel(entityModelId).isPresent()) {
+            EntityModel model = cacheBuffer.getModel(entityModelId).get();
+            Entity entity = null;
+            if (model != null && model.getEntity().isPresent()) {
+                entity = model.getEntity().get();
+            }
+            return Optional.of(new ModelProfile(entityModelId, entity, cacheBuffer.getMemoryConsumptionPerEntity()));
+        }
+        return Optional.empty();
     }
 }

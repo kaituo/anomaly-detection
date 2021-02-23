@@ -22,7 +22,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -72,7 +71,6 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
     private final CheckpointDao checkpointDao;
     private final EntityColdStartQueue entityColdStartQueue;
     private final ResultWriteQueue resultWriteQueue;
-    private final NodeStateManager stateManager;
     private final AnomalyDetectionIndices indexUtil;
     private final CacheProvider cacheProvider;
     private final CheckpointWriteQueue checkpointWriteQueue;
@@ -124,14 +122,14 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
             CHECKPOINT_READ_QUEUE_CONCURRENCY,
             executionTtl,
             CHECKPOINT_READ_QUEUE_BATCH_SIZE,
-            stateTtl
+            stateTtl,
+            stateManager
         );
 
         this.modelManager = modelManager;
         this.checkpointDao = checkpointDao;
         this.entityColdStartQueue = entityColdStartQueue;
         this.resultWriteQueue = resultWriteQueue;
-        this.stateManager = stateManager;
         this.indexUtil = indexUtil;
         this.cacheProvider = cacheProvider;
         this.checkpointWriteQueue = checkpointWriteQueue;
@@ -147,7 +145,11 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
     protected MultiGetRequest toBatchRequest(List<EntityFeatureRequest> toProcess) {
         MultiGetRequest multiGetRequest = new MultiGetRequest();
         for (EntityRequest request : toProcess) {
-            multiGetRequest.add(new MultiGetRequest.Item(CommonName.CHECKPOINT_INDEX_NAME, request.getModelId()));
+            Optional<String> modelId = request.getModelId();
+            if (false == modelId.isPresent()) {
+                continue;
+            }
+            multiGetRequest.add(new MultiGetRequest.Item(CommonName.CHECKPOINT_INDEX_NAME, modelId.get()));
         }
         return multiGetRequest;
     }
@@ -160,6 +162,7 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
 
             // lazy init since we don't expect retryable requests to happen often
             Set<String> retryableRequests = null;
+            Set<String> notFoundModels = null;
             for (MultiGetItemResponse itemResponse : itemResponses) {
                 String modelId = itemResponse.getId();
                 if (itemResponse.isFailed()) {
@@ -170,15 +173,32 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
                             entityColdStartQueue.put(origRequest);
                         }
                         return;
-                    }
-                    if (ExceptionUtil.isRetryAble(failure)) {
+                    } else if (ExceptionUtil.isNotFound(failure)) {
+                        if (notFoundModels == null) {
+                            notFoundModels = new HashSet<>();
+                        }
+                        notFoundModels.add(modelId);
+                    } else if (ExceptionUtil.isRetryAble(failure)) {
                         if (retryableRequests == null) {
                             retryableRequests = new HashSet<>();
                         }
                         retryableRequests.add(modelId);
+                    } else {
+                        LOG.info("Unexpected failure", failure);
                     }
                 } else {
                     successfulRequests.put(modelId, itemResponse);
+                }
+            }
+
+            // deal with not found model
+            if (notFoundModels != null) {
+                for (EntityRequest origRequest : toProcess) {
+                    Optional<String> modelId = origRequest.getModelId();
+                    if (modelId.isPresent() && notFoundModels.contains(modelId.get())) {
+                        // submit to cold start queue
+                        entityColdStartQueue.put(origRequest);
+                    }
                 }
             }
 
@@ -206,18 +226,24 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
             return;
         }
 
-        EntityFeatureRequest origRequest = toProcess.get(i);
-
-        String modelId = origRequest.getModelId();
-        String entityName = origRequest.getEntityName();
-        String detectorId = origRequest.getDetectorId();
-
-        MultiGetItemResponse checkpointResponse = successfulRequests.get(modelId);
-
         // whether we will process next response in callbacks
         // if false, finally will process next checkpoints
         boolean processNextInCallBack = false;
         try {
+            EntityFeatureRequest origRequest = toProcess.get(i);
+
+            Optional<String> modelIdOptional = origRequest.getModelId();
+            if (false == modelIdOptional.isPresent()) {
+                return;
+            }
+
+            String detectorId = origRequest.getDetectorId();
+            Entity entity = origRequest.getEntity();
+
+            String modelId = modelIdOptional.get();
+
+            MultiGetItemResponse checkpointResponse = successfulRequests.get(modelId);
+
             if (checkpointResponse != null) {
                 // successful requests
                 Optional<Map<String, Object>> checkpointString = checkpointDao.processRawCheckpoint(checkpointResponse.getResponse());
@@ -232,7 +258,7 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
                     }
 
                     ModelState<EntityModel> modelState = new ModelState<>(
-                        new EntityModel(modelId, new ArrayDeque<>(), null, null),
+                        new EntityModel(entity, new ArrayDeque<>(), null, null),
                         modelId,
                         detectorId,
                         ModelType.ENTITY.getName(),
@@ -240,7 +266,7 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
                         0
                     );
 
-                    modelState = modelManager.processEntityCheckpoint(checkpoint, modelId, entityName, modelState);
+                    modelState = modelManager.processEntityCheckpoint(checkpoint, modelState);
 
                     EntityModel entityModel = modelState.getModel();
 
@@ -255,7 +281,7 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
                         entityModel.addSample(origRequest.getCurrentFeature());
                     }
 
-                    stateManager
+                    nodeStateManager
                         .getAnomalyDetector(
                             detectorId,
                             onGetDetector(origRequest, i, detectorId, result, toProcess, successfulRequests, retryableRequests, modelState)
@@ -314,7 +340,7 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
                                 Instant.now(),
                                 Instant.now(),
                                 null,
-                                Arrays.asList(new Entity(detector.getCategoryField().get(0), origRequest.getEntityName())),
+                                origRequest.getEntity(),
                                 detector.getUser(),
                                 indexUtil.getSchemaVersion(ADIndex.RESULT)
                             )
@@ -333,7 +359,8 @@ public class CheckpointReadQueue extends BatchQueue<EntityFeatureRequest, MultiG
 
             processCheckpointIteration(index + 1, toProcess, successfulRequests, retryableRequests);
         }, exception -> {
-            LOG.error(new ParameterizedMessage("fail to get detector [{}]", detectorId), exception);
+            LOG.error(new ParameterizedMessage("fail to get checkpoint [{}]", modelState.getModelId()), exception);
+            nodeStateManager.setException(detectorId, exception);
             processCheckpointIteration(index + 1, toProcess, successfulRequests, retryableRequests);
         });
     }

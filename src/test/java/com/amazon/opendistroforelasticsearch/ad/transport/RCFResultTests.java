@@ -50,7 +50,7 @@ import com.amazon.opendistroforelasticsearch.ad.breaker.ADCircuitBreakerService;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.JsonPathNotFoundException;
 import com.amazon.opendistroforelasticsearch.ad.common.exception.LimitExceededException;
 import com.amazon.opendistroforelasticsearch.ad.constant.CommonErrorMessages;
-import com.amazon.opendistroforelasticsearch.ad.constant.CommonMessageAttributes;
+import com.amazon.opendistroforelasticsearch.ad.constant.CommonName;
 import com.amazon.opendistroforelasticsearch.ad.ml.ModelManager;
 import com.amazon.opendistroforelasticsearch.ad.ml.RcfResult;
 import com.google.gson.Gson;
@@ -183,12 +183,8 @@ public class RCFResultTests extends ESTestCase {
         request.toXContent(builder, ToXContent.EMPTY_PARAMS);
 
         String json = Strings.toString(builder);
-        assertEquals(JsonDeserializer.getTextValue(json, CommonMessageAttributes.ID_JSON_KEY), request.getAdID());
-        assertArrayEquals(
-            JsonDeserializer.getDoubleArrayValue(json, CommonMessageAttributes.FEATURE_JSON_KEY),
-            request.getFeatures(),
-            0.001
-        );
+        assertEquals(JsonDeserializer.getTextValue(json, CommonName.ID_JSON_KEY), request.getAdID());
+        assertArrayEquals(JsonDeserializer.getDoubleArrayValue(json, CommonName.FEATURE_JSON_KEY), request.getFeatures(), 0.001);
     }
 
     @SuppressWarnings("unchecked")
