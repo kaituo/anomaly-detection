@@ -91,7 +91,8 @@ public class EntityProfileTransportAction extends HandledTransportAction<EntityP
         String adID = request.getAdID();
         String entityValue = request.getEntityValue();
         String modelId = modelManager.getEntityModelId(adID, entityValue);
-        Optional<DiscoveryNode> node = hashRing.getOwningNode(modelId);
+        // we use entity value (e.g., app_0) to find its node
+        Optional<DiscoveryNode> node = hashRing.getOwningNode(entityValue);
         if (!node.isPresent()) {
             listener.onFailure(new AnomalyDetectionException(adID, NO_NODE_FOUND_MSG));
             return;

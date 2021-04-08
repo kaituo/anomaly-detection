@@ -38,4 +38,5 @@ public class CommonErrorMessages {
     public static String DETECTOR_IS_RUNNING = "Detector is already running";
     public static String DETECTOR_MISSING = "Detector is missing";
     public static String AD_TASK_ACTION_MISSING = "AD task action is missing";
+    public static final String BUG_RESPONSE = "We might have bugs.";
 }

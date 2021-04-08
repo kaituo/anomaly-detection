@@ -487,7 +487,7 @@ public class AnomalyResultTests extends AbstractADTest {
     }
 
     public void testNullPointerExceptionWhenRCF() {
-        noModelExceptionTemplate(new NullPointerException(), adID, EndRunException.class, AnomalyResultTransportAction.BUG_RESPONSE);
+        noModelExceptionTemplate(new NullPointerException(), adID, EndRunException.class, CommonErrorMessages.BUG_RESPONSE);
     }
 
     public void testADExceptionWhenColdStart() {
@@ -672,7 +672,7 @@ public class AnomalyResultTests extends AbstractADTest {
     }
 
     public void testThresholdException() {
-        thresholdExceptionTestTemplate(new NullPointerException(), adID, EndRunException.class, AnomalyResultTransportAction.BUG_RESPONSE);
+        thresholdExceptionTestTemplate(new NullPointerException(), adID, EndRunException.class, CommonErrorMessages.BUG_RESPONSE);
     }
 
     public void testCircuitBreaker() {
